@@ -6,8 +6,9 @@ import os
 import re
 from typing import Optional, Dict, Any
 
-# 设置国内镜像源，避免直连 huggingface.co 超时
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+# 可选：设置国内镜像源（国内开发时手动在 .env 中设置 HF_ENDPOINT=https://hf-mirror.com）
+# 不硬编码，让 Streamlit Cloud 使用默认的 huggingface.co
+pass
 
 # 从 .env 文件加载环境变量（本地开发用）
 try:
