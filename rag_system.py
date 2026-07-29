@@ -9,9 +9,8 @@ import re
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 
-# 可选：设置国内镜像源（国内开发时手动在 .env 中设置 HF_ENDPOINT=https://hf-mirror.com）
+# 可选：设置国内镜像源（本地开发时手动在 .env 中设置 HF_ENDPOINT=https://hf-mirror.com）
 # 不硬编码，让 Streamlit Cloud 使用默认的 huggingface.co
-pass
 
 # 从 .env 文件加载环境变量（本地开发用）
 try:
@@ -24,45 +23,39 @@ except ImportError:
 _llm = None
 _retriever = None
 _ocr_reader = None
-_init_error = None
 
 
 def _get_llm():
     """懒加载 LLM 实例"""
-    global _llm, _init_error
+    global _llm
 
     if _llm is not None:
         return _llm
 
-    try:
-        from langchain_openai import ChatOpenAI
+    from langchain_openai import ChatOpenAI
 
-        # 优先从环境变量读取 API Key
-        api_key = os.getenv("DEEPSEEK_API_KEY", "")
-        base_url = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+    # 优先从环境变量读取 API Key
+    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    base_url = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
 
-        if not api_key:
-            raise EnvironmentError(
-                "未检测到 DEEPSEEK_API_KEY，请在 Streamlit Cloud 的 Secrets 中设置该变量。"
-            )
-
-        _llm = ChatOpenAI(
-            model="deepseek-chat",
-            api_key=api_key,
-            base_url=base_url,
-            temperature=0.3,
-            timeout=30,
+    if not api_key:
+        raise EnvironmentError(
+            "未检测到 DEEPSEEK_API_KEY，请在 Streamlit Cloud 的 Secrets 中设置该变量。"
         )
-        return _llm
 
-    except Exception as e:
-        _init_error = f"LLM 初始化失败: {str(e)}"
-        raise
+    _llm = ChatOpenAI(
+        model="deepseek-chat",
+        api_key=api_key,
+        base_url=base_url,
+        temperature=0.3,
+        timeout=30,
+    )
+    return _llm
 
 
 def _get_retriever(cached_resources: Optional[Dict[str, Any]] = None):
     """懒加载向量数据库检索器，支持从外部注入缓存的 embedding / vector_db"""
-    global _retriever, _init_error
+    global _retriever
 
     # 优先使用外部注入的缓存（Streamlit @st.cache_resource 提供的全局单例）
     if _retriever is None and cached_resources:
@@ -77,33 +70,28 @@ def _get_retriever(cached_resources: Optional[Dict[str, Any]] = None):
     if _retriever is not None:
         return _retriever
 
-    try:
-        from langchain_community.vectorstores import Chroma
-        from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_community.vectorstores import Chroma
+    from langchain_huggingface import HuggingFaceEmbeddings
 
-        print("正在加载外交领事知识库...")
+    print("正在加载外交领事知识库...")
 
-        # Streamlit Cloud 上不需要 local_files_only
-        embeddings = HuggingFaceEmbeddings(
-            model_name="shibing624/text2vec-base-chinese",
-        )
+    # Streamlit Cloud 上不需要 local_files_only
+    embeddings = HuggingFaceEmbeddings(
+        model_name="shibing624/text2vec-base-chinese",
+    )
 
-        vector_db = Chroma(
-            persist_directory="./chroma_db",
-            embedding_function=embeddings
-        )
+    vector_db = Chroma(
+        persist_directory="./chroma_db",
+        embedding_function=embeddings
+    )
 
-        _retriever = vector_db.as_retriever(search_kwargs={"k": 3})
-        return _retriever
-
-    except Exception as e:
-        _init_error = f"知识库加载失败: {str(e)}"
-        raise
+    _retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+    return _retriever
 
 
 def _get_ocr_reader(cached_resources: Optional[Dict[str, Any]] = None):
     """懒加载 OCR 识别器，支持从外部注入缓存的 Reader"""
-    global _ocr_reader, _init_error
+    global _ocr_reader
 
     # 优先使用外部注入的缓存（Streamlit @st.cache_resource 提供的全局单例）
     if _ocr_reader is None and cached_resources:
@@ -115,32 +103,89 @@ def _get_ocr_reader(cached_resources: Optional[Dict[str, Any]] = None):
     if _ocr_reader is not None:
         return _ocr_reader
 
-    try:
-        import easyocr
+    import easyocr
 
-        print("正在初始化 OCR 视觉识别引擎...")
+    print("正在初始化 OCR 视觉识别引擎...")
 
-        # 使用项目内目录存放 OCR 模型
-        ocr_model_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            ".easyocr_model"
-        )
-        os.makedirs(ocr_model_dir, exist_ok=True)
+    # 使用项目内目录存放 OCR 模型
+    ocr_model_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        ".easyocr_model"
+    )
+    os.makedirs(ocr_model_dir, exist_ok=True)
 
-        _ocr_reader = easyocr.Reader(
-            ['ch_sim', 'en'],
-            model_storage_directory=ocr_model_dir,
-            user_network_directory=ocr_model_dir,
-        )
-        return _ocr_reader
-
-    except Exception as e:
-        _init_error = f"OCR 引擎初始化失败: {str(e)}"
-        raise
+    _ocr_reader = easyocr.Reader(
+        ['ch_sim', 'en'],
+        model_storage_directory=ocr_model_dir,
+        user_network_directory=ocr_model_dir,
+    )
+    return _ocr_reader
 
 
 # 支持的图片格式扩展名
 SUPPORTED_IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'}
+
+# OCR 处理的最大图片尺寸（长边像素数），超过此值会等比缩放
+MAX_IMAGE_SIDE = 1800
+# OCR 单张图片处理超时（秒）
+OCR_TIMEOUT_SEC = 45
+
+
+def _preprocess_image(image_path: str, max_side: int = MAX_IMAGE_SIDE) -> str:
+    """
+    图片预处理：将大尺寸图片等比缩放到合理范围，避免 OCR 阻塞爆内存。
+    返回处理后的图片文件路径（若无需处理则返回原路径）。
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as img:
+            width, height = img.size
+            long_side = max(width, height)
+
+            # 尺寸合理，无需处理
+            if long_side <= max_side:
+                return image_path
+
+            # 计算缩放比例
+            scale = max_side / long_side
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+
+            print(f"[OCR] 图片过大 ({width}x{height})，预处理缩放到 {new_width}x{new_height}")
+
+            # 保持模式兼容（转 RGB 以避免带透明通道 PNG 的 OCR 兼容性问题）
+            if img.mode in ('RGBA', 'P', 'LA'):
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if 'A' in img.mode else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            resized_img = img.resize((new_width, new_height), Image.LANCZOS)
+
+            # 保存到临时文件
+            import tempfile
+            import hashlib
+            temp_dir = tempfile.mkdtemp(prefix="ocr_preproc_")
+            # 使用原文件名+尺寸hash生成新文件名，保持扩展名
+            ext = os.path.splitext(image_path)[1].lower() or '.jpg'
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            size_hash = hashlib.md5(f"{new_width}x{new_height}".encode()).hexdigest()[:6]
+            new_path = os.path.join(temp_dir, f"{base_name}_resized_{size_hash}{ext}")
+
+            save_kwargs = {}
+            if ext in ('.jpg', '.jpeg'):
+                save_kwargs['quality'] = 92
+                save_kwargs['optimize'] = True
+            resized_img.save(new_path, **save_kwargs)
+            return new_path
+
+    except Exception as e:
+        print(f"[OCR] 图片预处理失败，使用原图: {type(e).__name__}: {e}")
+        return image_path
 
 
 def _clean_ocr_text(raw_lines):
@@ -216,19 +261,47 @@ def extract_text_from_image(
         )
         return result
 
+    preprocessed_path = None
     try:
+        # ===== 步骤 1：图片预处理（大尺寸图片缩放，避免 OCR 阻塞） =====
+        preprocessed_path = _preprocess_image(image_path, max_side=MAX_IMAGE_SIDE)
         print(f"[OCR] 正在识别图片: {image_path} ({file_size_mb:.2f} MB)")
 
         # 懒加载 OCR 识别器（优先使用缓存模型，避免重复加载爆内存）
         ocr_reader = _get_ocr_reader(cached_resources)
 
-        raw_results = ocr_reader.readtext(
-            image_path,
-            detail=1,
-            paragraph=False,
-            contrast_ths=0.1,
-            adjust_contrast=0.5,
-        )
+        # ===== 步骤 2：使用子线程 + 超时保护执行 OCR，防止主线程永久阻塞 =====
+        import threading
+        ocr_results_holder = {"raw": None, "error": None}
+
+        def _ocr_worker():
+            try:
+                ocr_results_holder["raw"] = ocr_reader.readtext(
+                    preprocessed_path,
+                    detail=1,
+                    paragraph=False,
+                    contrast_ths=0.1,
+                    adjust_contrast=0.5,
+                )
+            except Exception as thread_err:  # noqa: BLE001
+                ocr_results_holder["error"] = thread_err
+
+        ocr_thread = threading.Thread(target=_ocr_worker, daemon=True)
+        ocr_thread.start()
+        ocr_thread.join(timeout=OCR_TIMEOUT_SEC)
+
+        if ocr_thread.is_alive():
+            print(f"[OCR] 识别超时（>{OCR_TIMEOUT_SEC}s），已中断")
+            result["message"] = (
+                f"⏱️ 图片识别超时（超过 {OCR_TIMEOUT_SEC} 秒未完成）。\n"
+                "建议：更换分辨率更低、文字更清晰的图片后重试。"
+            )
+            return result
+
+        if ocr_results_holder["error"] is not None:
+            raise ocr_results_holder["error"]
+
+        raw_results = ocr_results_holder["raw"] or []
 
         confident_lines = []
         low_conf_count = 0
@@ -250,14 +323,20 @@ def extract_text_from_image(
             hint = ""
             if low_conf_count > 0:
                 hint = f"（已过滤 {low_conf_count} 条低置信度噪点）"
+            scaled_note = ""
+            if preprocessed_path != image_path:
+                scaled_note = "（大图已自动压缩处理）"
             result["message"] = (
                 f"✅ 图片识别成功，共提取 {len(cleaned_text.splitlines())} 行，"
-                f"{char_count} 个字符{hint}。"
+                f"{char_count} 个字符{hint}{scaled_note}。"
             )
         else:
             result["has_text"] = False
+            scaled_note = ""
+            if preprocessed_path != image_path:
+                scaled_note = "（大图已自动压缩处理）"
             result["message"] = (
-                "⚠️ 图片识别完成，但未检测到可识别的文字内容。\n"
+                f"⚠️ 图片识别完成，但未检测到可识别的文字内容。{scaled_note}\n"
                 "建议：上传清晰度更高、文字较大的证件或告示图片，并确保文字正面朝上。"
             )
 
@@ -270,6 +349,16 @@ def extract_text_from_image(
             "请检查图片格式与清晰度，或稍后再试。"
         )
         return result
+    finally:
+        # 清理预处理产生的临时文件
+        if preprocessed_path and preprocessed_path != image_path and os.path.exists(preprocessed_path):
+            try:
+                os.remove(preprocessed_path)
+                temp_parent = os.path.dirname(preprocessed_path)
+                if os.path.basename(temp_parent).startswith("ocr_preproc_"):
+                    os.rmdir(temp_parent)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
@@ -281,7 +370,7 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
         from ddgs import DDGS
 
         # 加入领域关键词，提升搜索结果相关性
-        search_query = f"{query} 领事保护 外交部 site:cs.mfa.gov.cn OR site:mfa.gov.cn OR 领事服务"
+        search_query = f"{query} 领事保护 外交部"
         print(f"[Web Search] 正在搜索：{query[:60]}...")
         raw_results = list(DDGS().text(search_query, max_results=max_results))
 
