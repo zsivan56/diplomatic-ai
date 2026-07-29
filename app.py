@@ -384,6 +384,8 @@ def main():
         st.session_state.trigger_query = False
     if "last_report_data" not in st.session_state:
         st.session_state.last_report_data = None  # 保存最近一次研判的报告文本
+    if "last_result" not in st.session_state:
+        st.session_state.last_result = None  # 保存最近一次研判的完整结果
 
     # 文本输入框（绑定到 session_state，支持按钮自动填充）
     user_input = st.text_area(
@@ -404,6 +406,42 @@ def main():
     if st.session_state.get("trigger_query"):
         st.session_state.trigger_query = False
 
+    # 结果渲染函数（供新查询和恢复显示共用）
+    def render_result(result, question_text):
+        """渲染研判结果并保存到 session_state"""
+        st.markdown("---")
+
+        # OCR 结果
+        render_ocr_result(result.get("ocr_result"))
+
+        # 错误处理
+        if result.get("error"):
+            st.error(f"⚠️ 处理提示\n\n{result['error']}")
+            st.session_state.last_report_data = None
+            st.session_state.last_result = None
+        else:
+            # LLM 回答
+            render_llm_answer(
+                result.get("llm_answer", ""),
+                result.get("context_text", "")
+            )
+
+            # 生成并保存报告文本（用于下载）
+            llm_ans = result.get("llm_answer", "")
+            ctx_text = result.get("context_text", "")
+            if llm_ans or ctx_text:
+                report_text = generate_report_text(
+                    user_question=question_text,
+                    ocr_result=result.get("ocr_result"),
+                    llm_answer=llm_ans,
+                    context_text=ctx_text,
+                )
+                st.session_state.last_report_data = report_text
+                st.session_state.last_result = result
+            else:
+                st.session_state.last_report_data = None
+                st.session_state.last_result = None
+
     if should_run:
         if not user_input and not uploaded_file:
             st.warning("⚠️ 请输入提问文本或上传证件图片后再提交。")
@@ -416,41 +454,12 @@ def main():
                 try:
                     # 调用 RAG 系统
                     result = process_query(user_text=user_input or "", image_path=image_path)
-
-                    # 渲染结果
-                    st.markdown("---")
-
-                    # OCR 结果
-                    render_ocr_result(result.get("ocr_result"))
-
-                    # 错误处理
-                    if result.get("error"):
-                        st.error(f"⚠️ 处理提示\n\n{result['error']}")
-                        st.session_state.last_report_data = None
-                    else:
-                        # LLM 回答
-                        render_llm_answer(
-                            result.get("llm_answer", ""),
-                            result.get("context_text", "")
-                        )
-
-                        # 生成并保存报告文本（用于下载）
-                        llm_ans = result.get("llm_answer", "")
-                        ctx_text = result.get("context_text", "")
-                        if llm_ans or ctx_text:
-                            report_text = generate_report_text(
-                                user_question=user_input or "",
-                                ocr_result=result.get("ocr_result"),
-                                llm_answer=llm_ans,
-                                context_text=ctx_text,
-                            )
-                            st.session_state.last_report_data = report_text
-                        else:
-                            st.session_state.last_report_data = None
+                    render_result(result, user_input or "")
 
                 except Exception as e:
                     st.error(f"❌ 系统处理时发生错误：\n\n**错误类型**：{type(e).__name__}\n\n**错误信息**：{str(e)}")
                     st.session_state.last_report_data = None
+                    st.session_state.last_result = None
 
                 finally:
                     # 清理临时文件
@@ -460,6 +469,12 @@ def main():
                             os.rmdir(os.path.dirname(image_path))
                         except:  # noqa: E722
                             pass
+    elif st.session_state.get("last_result"):
+        # 页面重新运行时（如点击下载按钮），恢复显示上一次的研判结果
+        render_result(
+            st.session_state.last_result,
+            st.session_state.last_result.get("user_text", "")
+        )
 
     # ========== 导出研判报告按钮（仅当有研判结果时才显示）==========
     if st.session_state.get("last_report_data"):
