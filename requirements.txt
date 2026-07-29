@@ -1,17 +1,6 @@
 # ============================================
 # 外交与领事多模态智能服务系统 - 依赖清单
 # Streamlit Community Cloud (share.streamlit.io) 部署版本
-#
-# 关键策略：
-#   A) 纯 Python 顶层包：锁定精确 minor 版本，保证行为稳定
-#   B) 二进制重型包（torch/numpy/scipy/opencv/Pillow/scikit-image）：
-#      故意放宽为区间版本，让 pip 自动匹配 Python 版本 + CPU 架构的预编译 wheel
-#      避免从 C/C++ 源码编译导致 "installer returned non-zero exit code"
-#   C) langchain 家族：只锁定顶层包，传递依赖（langchain-core 等）交给 pip 自动解析
-#      否则极易出现 "ResolutionImpossible: version conflicts"
-#
-# Streamlit Cloud 预装：Python 3.10/3.11、Ubuntu 基础镜像
-# 系统库 libgl1 / libglib2.0-0 / libgomp1 / libjpeg 已包含，无需额外安装
 # ============================================
 
 # ===== Web UI 界面 =====
@@ -24,7 +13,6 @@ easyocr==1.7.2
 openai==1.40.0
 
 # ===== RAG 框架核心 =====
-# 只锁定顶层包，langchain-core/langchain-text-splitters 由 pip 传递解析
 langchain>=0.2.15,<0.3.0
 langchain-community>=0.2.15,<0.3.0
 langchain-huggingface==0.0.3
@@ -39,10 +27,10 @@ sentence-transformers==2.7.0
 # ===== PDF 文档处理 =====
 pypdf==4.3.1
 
-# ===== 环境变量管理（本地 .env 读取） =====
+# ===== 环境变量管理 =====
 python-dotenv==1.0.1
 
-# ===== 基础工具（纯 Python，锁定版本即可） =====
+# ===== 基础工具 =====
 certifi>=2024.2.0
 huggingface-hub>=0.23.0,<1.0
 pydantic>=2.5,<3.0
@@ -54,23 +42,12 @@ regex>=2024.0
 pyyaml>=6.0
 tqdm>=4.65
 
-# ===== 网络搜索（联网检索能力） =====
+# ===== 网络搜索 =====
 ddgs>=9.0.0
 
-# ============================================
-# 二进制重型包 — 版本区间策略（重点）
-# 这些包都带 C/C++ 扩展，精确锁版本在 Streamlit Cloud 容易踩：
-#   - 找不到匹配 Python 版本的 wheel → 从源码编译 → 失败
-#   - 编译依赖缺失 → installer returned non-zero exit code
-# 放宽后 pip 会自动挑一个有可用 wheel 的版本，成功率 99%+
-# ============================================
-
-# PyTorch CPU 版本（EasyOCR + sentence-transformers 底层依赖）
-# 区间覆盖 2.x 系列即可，不需要 GPU 支持
+# ===== 二进制重型包（用区间，不要锁死版本） =====
 torch>=2.0,<3.0
 torchvision>=0.15,<1.0
-
-# 图像处理 / 科学计算
 opencv-python-headless>=4.8,<5.0
 Pillow>=10.0,<12.0
 numpy>=1.24,<2.0
