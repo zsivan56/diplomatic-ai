@@ -1,10 +1,13 @@
 """
 RAG 核心系统：多模态领事服务与外交礼仪智能助手
 优化版本：支持 Streamlit Cloud 部署
+- 网络搜索（DuckDuckGo）作为主要信息来源
+- 本地知识库作为校验参考，纠正幻觉
 """
 import os
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
 
 # 可选：设置国内镜像源（国内开发时手动在 .env 中设置 HF_ENDPOINT=https://hf-mirror.com）
 # 不硬编码，让 Streamlit Cloud 使用默认的 huggingface.co
@@ -247,32 +250,85 @@ def extract_text_from_image(image_path: Optional[str]) -> Dict[str, Any]:
         return result
 
 
-def format_context_with_metadata(relevant_docs):
+def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
     """
-    将检索到的文档片段格式化为结构化的 Markdown 输出
-    格式：
-    ---
-    📌 **依据 [序号]**
-    • **权威来源**：[来源文件名]
-    • **发布/发布机构**：[authority]
-    • **调取的原条文节选**：
-      > "[具体检索到的文本片段...]"
-    ---
+    使用 DuckDuckGo 搜索网络信息，返回结构化搜索结果。
+    每条结果包含：title, source(域名), snippet, url
     """
-    formatted_parts = []
+    try:
+        from ddgs import DDGS
 
+        # 加入领域关键词，提升搜索结果相关性
+        search_query = f"{query} 领事保护 外交部 site:cs.mfa.gov.cn OR site:mfa.gov.cn OR 领事服务"
+        print(f"[Web Search] 正在搜索：{query[:60]}...")
+        raw_results = list(DDGS().text(search_query, max_results=max_results))
+
+        formatted = []
+        for r in raw_results:
+            title = r.get("title", "")
+            url = r.get("href", r.get("link", ""))
+            snippet = r.get("body", r.get("snippet", ""))
+            domain = urlparse(url).netloc if url else "未知来源"
+
+            if title and snippet:
+                formatted.append({
+                    "title": title,
+                    "source": domain,
+                    "snippet": snippet,
+                    "url": url,
+                })
+
+        print(f"[Web Search] 获取到 {len(formatted)} 条网络搜索结果")
+        return formatted
+
+    except Exception as e:
+        print(f"[Web Search] 搜索失败: {type(e).__name__}: {e}")
+        return []
+
+
+def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
+    """
+    将网络搜索结果格式化为结构化的「依据」卡片
+    """
+    if not web_results:
+        return ""
+
+    formatted_parts = []
+    for i, result in enumerate(web_results, 1):
+        title = result.get("title", "未知标题")
+        source = result.get("source", "未知来源")
+        snippet = result.get("snippet", "无摘要")
+
+        formatted_part = f"""---
+🌐 **依据 [{i}]**
+• **权威来源**：{title}
+• **发布机构**：{source}
+• **调取的原条文节选**：
+  > "{snippet.strip()}"
+---"""
+        formatted_parts.append(formatted_part)
+
+    return "\n\n".join(formatted_parts)
+
+
+def format_local_db_reference(relevant_docs) -> str:
+    """
+    将本地知识库检索结果格式化为「知识库校验」卡片，用于纠正幻觉
+    """
+    if not relevant_docs:
+        return ""
+
+    formatted_parts = []
     for i, doc in enumerate(relevant_docs, 1):
-        # 提取元数据
         metadata = doc.metadata if hasattr(doc, 'metadata') else {}
         source_title = metadata.get("source_title", "未知来源")
         authority = metadata.get("authority", "未知机构")
         page_content = doc.page_content if hasattr(doc, 'page_content') else str(doc)
 
-        # 格式化单个依据
         formatted_part = f"""---
-📌 **依据 [{i}]**
+📚 **知识库校验 [{i}]**
 • **权威来源**：{source_title}
-• **发布/发布机构**：{authority}
+• **发布机构**：{authority}
 • **调取的原条文节选**：
   > "{page_content.strip()}"
 ---"""
@@ -337,38 +393,55 @@ def process_query(user_text: str = "", image_path: Optional[str] = None) -> Dict
             output["error"] = "请提供文字提问或上传包含可识别文字的证件/告示图片！"
         return output
 
-    # ========== 模块 C: 检索增强生成 (RAG) ==========
+    # ========== 模块 C: 网络搜索（主要信息来源）==========
+    web_results = []
+    web_evidence_text = ""
     try:
-        # 懒加载检索器
-        retriever = _get_retriever()
-
-        print(f"[RAG] 正在检索知识库中的相关条款，查询长度={len(combined_query)}...")
-        relevant_docs = retriever.invoke(combined_query)
-
-        # 使用结构化格式化函数
-        context_text = format_context_with_metadata(relevant_docs)
-        output["context_text"] = context_text
-
+        web_results = search_web(combined_query, max_results=3)
+        web_evidence_text = format_web_evidence(web_results)
     except Exception as e:  # noqa: BLE001
-        output["error"] = f"知识库检索失败：{type(e).__name__}: {e}"
+        print(f"[Web Search] 异常: {e}")
+
+    # ========== 模块 D: 本地知识库检索（纠正幻觉）==========
+    local_db_text = ""
+    try:
+        retriever = _get_retriever()
+        print(f"[RAG] 正在检索本地知识库校验条款...")
+        relevant_docs = retriever.invoke(combined_query)
+        local_db_text = format_local_db_reference(relevant_docs)
+    except Exception as e:  # noqa: BLE001
+        print(f"[RAG] 本地知识库检索失败: {e}")
+
+    # 合并展示：网络依据 + 知识库校验
+    context_parts = []
+    if web_evidence_text:
+        context_parts.append(web_evidence_text)
+    if local_db_text:
+        context_parts.append(local_db_text)
+
+    context_text = "\n\n".join(context_parts) if context_parts else ""
+    output["context_text"] = context_text
+
+    if not context_text:
+        output["error"] = "网络搜索与本地知识库均未获取到有效参考信息，请稍后重试。"
         return output
 
-    # ========== 模块 D: 构建 Prompt 并调用 LLM ==========
+    # ========== 模块 E: 构建 Prompt 并调用 LLM ==========
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
-        
+
         # 懒加载 LLM
         llm = _get_llm()
-        
+
         system_content = f"""你是一名专业的外交领事与涉外礼仪智能助手。
-请结合以下从官方知识库中检索到的权威依据，回答用户的问题或对证件信息给出提醒。
+请结合以下网络搜索结果与本地知识库校验资料，回答用户的问题或对证件信息给出提醒。
 
 要求：
 1. 态度严谨、礼貌，符合外交礼仪规范。
-2. 答案必须严格优先依据提供的参考资料，切勿捏造条款。
-3. 标注回答所参考的依据编号。
+2. 网络搜索结果为主要的参考依据，本地知识库校验用于核实和补充，切勿捏造条款。
+3. 标注回答所参考的依据编号（如「依据 [1]」「知识库校验 [1]」）。
 
-【官方检索依据】：
+【参考依据】：
 {context_text}"""
 
         if extracted_text:
@@ -384,7 +457,7 @@ def process_query(user_text: str = "", image_path: Optional[str] = None) -> Dict
             HumanMessage(content=user_content),
         ])
         output["llm_answer"] = response.content
-        
+
     except Exception as e:  # noqa: BLE001
         output["error"] = f"大模型调用失败：{type(e).__name__}: {e}"
         return output

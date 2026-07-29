@@ -357,10 +357,10 @@ def render_llm_answer(answer, context):
 
     # ========== 参考依据区（折叠卡片，默认收起）==========
     if context:
-        with st.expander("🔍 调用的官方领事与礼仪依据条款（点击展开/折叠）", expanded=False):
+        with st.expander("🔍 检索依据：网络搜索结果与知识库校验条款（点击展开/折叠）", expanded=False):
             st.markdown("""
             <div style="color: #0F2C59; font-weight: 600; margin-bottom: 0.5rem;">
-                📚 以下内容为从知识库中检索到的相关官方条款，供您参考：
+                📚 以下内容包含：<b>🌐 网络搜索依据</b>（主要信息来源）与 <b>📚 知识库校验</b>（纠正幻觉），供您参考：
             </div>
             """, unsafe_allow_html=True)
             st.markdown(context)

@@ -42,6 +42,9 @@ def add_metadata_to_documents(documents, file_name):
     return documents
 
 
+# 排除非知识库文件
+EXCLUDE_FILES = {"requirements.txt", "packages.txt", ".env"}
+
 print("--- 开始读取知识库文档 ---")
 
 documents = []
@@ -49,6 +52,8 @@ success_count = 0
 fail_count = 0
 
 for file in os.listdir("."):
+    if file in EXCLUDE_FILES:
+        continue
     if file.endswith(".pdf"):
         print(f"正在尝试加载 PDF: {file}")
         try:
