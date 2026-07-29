@@ -1,7 +1,9 @@
 # ============================================
 # 外交与领事多模态智能服务系统 - 依赖清单
-# Streamlit Cloud 部署版本
-# 关键依赖锁定版本,避免重建时因升级而 break
+# Hugging Face Spaces 部署优化版本
+# - 纯 Python 包：锁定 minor 版本保证行为稳定
+# - 二进制重型包（torch/numpy/scipy/opencv/Pillow）：放宽版本，让 pip 选择匹配平台和 Python 版本的 wheel
+#   （HF Spaces 默认 Python 3.10/3.12，精确版本可能没有对应 wheel 导致从源码编译失败）
 # ============================================
 
 # Web UI 界面
@@ -14,10 +16,11 @@ easyocr==1.7.2
 openai==1.40.0
 
 # RAG 框架核心
-langchain==0.2.14
-langchain-community==0.2.14
-langchain-core==0.2.32
-langchain-text-splitters==0.2.2
+# 注意：langchain 家族内部依赖关系很严格，只锁定顶层包版本，
+# langchain-core / langchain-text-splitters 等传递依赖交给 pip 自动解析
+# langchain-community 0.2.14 被官方 yanked，使用 0.2.15+
+langchain>=0.2.15,<0.3.0
+langchain-community>=0.2.15,<0.3.0
 langchain-huggingface==0.0.3
 langchain-openai==0.1.22
 
@@ -34,40 +37,48 @@ pypdf==4.3.1
 python-dotenv==1.0.1
 
 # SSL 证书
-certifi==2024.7.4
+certifi>=2024.2.0
 
 # Hugging Face 模型下载
-huggingface-hub==0.24.6
+huggingface-hub>=0.23.0,<1.0
+
+# ============================================
+# 以下为二进制重型包，故意不锁死精确版本
+# 让 pip 自动匹配 Python 版本 + CPU 架构的预编译 wheel
+# 避免从源码编译导致 installer returned non-zero exit code
+# ============================================
 
 # PyTorch (EasyOCR 和 embeddings 的底层依赖)
-torch==2.4.0
-torchvision==0.19.0
+# - CPU 版本即可，不需要 GPU
+torch>=2.0,<3.0
+torchvision>=0.15,<1.0
 
 # 图像处理库 (EasyOCR 依赖)
-opencv-python-headless==4.10.0.84
-Pillow==10.4.0
-numpy==1.26.4
+# - Pillow 10.x/11.x 均可，不锁死 patch 避免编译失败
+opencv-python-headless>=4.8,<5.0
+Pillow>=10.0,<12.0
+numpy>=1.24,<2.0
 
 # 数据处理
-pydantic==2.8.2
-typing-extensions==4.12.2
+pydantic>=2.5,<3.0
+typing-extensions>=4.8,<5.0
 
 # 异步支持
-aiohttp==3.10.2
-httpcore==1.0.5
-httpx==0.27.0
+aiohttp>=3.9,<4.0
+httpcore>=1.0,<2.0
+httpx>=0.27,<1.0
 
 # 向量计算
-scipy==1.13.1
+scipy>=1.10,<2.0
 
 # 正则表达式增强
-regex==2024.7.24
+regex>=2024.0
 
 # YAML 解析
-pyyaml==6.0.2
+pyyaml>=6.0
 
 # 进度条
-tqdm==4.66.5
+tqdm>=4.65
 
 # 网络搜索（联网检索能力）
-ddgs==9.0.0
+ddgs>=9.0.0

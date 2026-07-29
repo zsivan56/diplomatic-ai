@@ -1,2 +1,18 @@
-freeglut3-dev
+# Hugging Face Spaces (Debian/Ubuntu) 系统依赖
+# ==========================================
+# OpenCV (opencv-python-headless) 运行时依赖
 libgl1
+libglib2.0-0
+libsm6
+libxext6
+libxrender1
+
+# PyTorch / EasyOCR 运行时依赖（OpenMP 等）
+libgomp1
+
+# Pillow 图像 IO 依赖
+libjpeg-dev
+libpng-dev
+
+# freeglut3 (freeglut3-dev 的运行时包，体积更小)
+freeglut3
