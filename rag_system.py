@@ -30,92 +30,110 @@ _init_error = None
 def _get_llm():
     """懒加载 LLM 实例"""
     global _llm, _init_error
-    
+
     if _llm is not None:
         return _llm
-    
+
     try:
         from langchain_openai import ChatOpenAI
-        
+
         # 优先从环境变量读取 API Key
         api_key = os.getenv("DEEPSEEK_API_KEY", "")
         base_url = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-        
+
         if not api_key:
             raise EnvironmentError(
                 "未检测到 DEEPSEEK_API_KEY，请在 Streamlit Cloud 的 Secrets 中设置该变量。"
             )
-        
+
         _llm = ChatOpenAI(
             model="deepseek-chat",
             api_key=api_key,
             base_url=base_url,
-            temperature=0.3
+            temperature=0.3,
+            timeout=30,
         )
         return _llm
-        
+
     except Exception as e:
         _init_error = f"LLM 初始化失败: {str(e)}"
         raise
 
 
-def _get_retriever():
-    """懒加载向量数据库检索器"""
+def _get_retriever(cached_resources: Optional[Dict[str, Any]] = None):
+    """懒加载向量数据库检索器，支持从外部注入缓存的 embedding / vector_db"""
     global _retriever, _init_error
-    
+
+    # 优先使用外部注入的缓存（Streamlit @st.cache_resource 提供的全局单例）
+    if _retriever is None and cached_resources:
+        cached_db = cached_resources.get("vector_db")
+        if cached_db is not None:
+            try:
+                _retriever = cached_db.as_retriever(search_kwargs={"k": 3})
+                return _retriever
+            except Exception as e:  # noqa: BLE001
+                print(f"[RAG] 使用缓存 vector_db 失败，回退懒加载: {e}")
+
     if _retriever is not None:
         return _retriever
-    
+
     try:
         from langchain_community.vectorstores import Chroma
         from langchain_huggingface import HuggingFaceEmbeddings
-        
+
         print("正在加载外交领事知识库...")
-        
+
         # Streamlit Cloud 上不需要 local_files_only
         embeddings = HuggingFaceEmbeddings(
             model_name="shibing624/text2vec-base-chinese",
         )
-        
+
         vector_db = Chroma(
             persist_directory="./chroma_db",
             embedding_function=embeddings
         )
-        
+
         _retriever = vector_db.as_retriever(search_kwargs={"k": 3})
         return _retriever
-        
+
     except Exception as e:
         _init_error = f"知识库加载失败: {str(e)}"
         raise
 
 
-def _get_ocr_reader():
-    """懒加载 OCR 识别器"""
+def _get_ocr_reader(cached_resources: Optional[Dict[str, Any]] = None):
+    """懒加载 OCR 识别器，支持从外部注入缓存的 Reader"""
     global _ocr_reader, _init_error
-    
+
+    # 优先使用外部注入的缓存（Streamlit @st.cache_resource 提供的全局单例）
+    if _ocr_reader is None and cached_resources:
+        cached = cached_resources.get("ocr_reader")
+        if cached is not None:
+            _ocr_reader = cached
+            return _ocr_reader
+
     if _ocr_reader is not None:
         return _ocr_reader
-    
+
     try:
         import easyocr
-        
+
         print("正在初始化 OCR 视觉识别引擎...")
-        
+
         # 使用项目内目录存放 OCR 模型
         ocr_model_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 
+            os.path.dirname(os.path.abspath(__file__)),
             ".easyocr_model"
         )
         os.makedirs(ocr_model_dir, exist_ok=True)
-        
+
         _ocr_reader = easyocr.Reader(
             ['ch_sim', 'en'],
             model_storage_directory=ocr_model_dir,
             user_network_directory=ocr_model_dir,
         )
         return _ocr_reader
-        
+
     except Exception as e:
         _init_error = f"OCR 引擎初始化失败: {str(e)}"
         raise
@@ -147,12 +165,16 @@ def _clean_ocr_text(raw_lines):
     return "\n".join(cleaned)
 
 
-def extract_text_from_image(image_path: Optional[str]) -> Dict[str, Any]:
+def extract_text_from_image(
+    image_path: Optional[str],
+    cached_resources: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     从图片中使用 EasyOCR 提取文字。
 
     参数:
         image_path: 图片文件路径
+        cached_resources: 外部注入的缓存模型（来自 Streamlit @st.cache_resource）
 
     返回:
         dict: {
@@ -197,8 +219,8 @@ def extract_text_from_image(image_path: Optional[str]) -> Dict[str, Any]:
     try:
         print(f"[OCR] 正在识别图片: {image_path} ({file_size_mb:.2f} MB)")
 
-        # 懒加载 OCR 识别器
-        ocr_reader = _get_ocr_reader()
+        # 懒加载 OCR 识别器（优先使用缓存模型，避免重复加载爆内存）
+        ocr_reader = _get_ocr_reader(cached_resources)
 
         raw_results = ocr_reader.readtext(
             image_path,
@@ -337,9 +359,15 @@ def format_local_db_reference(relevant_docs) -> str:
     return "\n\n".join(formatted_parts)
 
 
-def process_query(user_text: str = "", image_path: Optional[str] = None) -> Dict[str, Any]:
+def process_query(
+    user_text: str = "",
+    image_path: Optional[str] = None,
+    cached_resources: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     核心处理函数：融合 CV 提取结果与 RAG 知识库检索。
+    - cached_resources：由 Streamlit @st.cache_resource 注入的全局单例模型，
+      避免多用户访问时重复加载模型导致内存溢出。
 
     返回一个字典，供前端分区域展示：
     {
@@ -351,6 +379,30 @@ def process_query(user_text: str = "", image_path: Optional[str] = None) -> Dict
         "error": str
     }
     """
+    # ========== 最外层兜底：任何未预料的异常都不崩溃 ==========
+    _fallback = {
+        "ocr_result": None,
+        "llm_answer": "",
+        "context_text": "",
+        "user_text": user_text or "",
+        "combined_query": user_text or "",
+        "error": "⚠️ 服务器繁忙或检索超时，请稍后再试或简化输入问题。",
+    }
+    try:
+        return _process_query_inner(user_text, image_path, cached_resources)
+    except Exception as e:  # noqa: BLE001
+        print(f"[CRITICAL] process_query 全局异常: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return _fallback
+
+
+def _process_query_inner(
+    user_text: str,
+    image_path: Optional[str],
+    cached_resources: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """process_query 的内部实现（被外层 try-except 兜底包装）"""
     output = {
         "ocr_result": None,
         "llm_answer": "",
@@ -365,7 +417,8 @@ def process_query(user_text: str = "", image_path: Optional[str] = None) -> Dict
 
     if image_path:
         try:
-            ocr_result_dict = extract_text_from_image(image_path)
+            # 将 cached_resources 注入到 OCR 初始化链路中（避免重复加载爆内存）
+            ocr_result_dict = extract_text_from_image(image_path, cached_resources=cached_resources)
             ocr_result_dict["input_image"] = image_path
             output["ocr_result"] = ocr_result_dict
 
@@ -405,7 +458,7 @@ def process_query(user_text: str = "", image_path: Optional[str] = None) -> Dict
     # ========== 模块 D: 本地知识库检索（纠正幻觉）==========
     local_db_text = ""
     try:
-        retriever = _get_retriever()
+        retriever = _get_retriever(cached_resources)
         print(f"[RAG] 正在检索本地知识库校验条款...")
         relevant_docs = retriever.invoke(combined_query)
         local_db_text = format_local_db_reference(relevant_docs)

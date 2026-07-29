@@ -1,9 +1,11 @@
 """
 Streamlit 前端应用：基于 RAG 的多模态领事服务与外交礼仪智能助手
+优化：@st.cache_resource 全局缓存模型，防止多用户访问内存溢出
 """
 import os
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 # 确保项目根目录在 sys.path 中，以便导入 rag_system
@@ -12,6 +14,46 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import streamlit as st
 from datetime import datetime
 from rag_system import process_query
+
+
+# ========== 全局模型缓存（@st.cache_resource 防止多用户重复加载爆内存）==========
+@st.cache_resource(show_spinner=False, max_entries=1, ttl=None)
+def get_cached_ocr_reader():
+    """全局缓存 EasyOCR 阅读器，避免多用户重复加载 PyTorch 模型"""
+    import easyocr
+
+    ocr_model_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        ".easyocr_model"
+    )
+    os.makedirs(ocr_model_dir, exist_ok=True)
+
+    return easyocr.Reader(
+        ['ch_sim', 'en'],
+        model_storage_directory=ocr_model_dir,
+        user_network_directory=ocr_model_dir,
+    )
+
+
+@st.cache_resource(show_spinner=False, max_entries=1, ttl=None)
+def get_cached_embeddings():
+    """全局缓存 HuggingFace Embedding 模型"""
+    from langchain_huggingface import HuggingFaceEmbeddings
+
+    return HuggingFaceEmbeddings(
+        model_name="shibing624/text2vec-base-chinese",
+    )
+
+
+@st.cache_resource(show_spinner=False, max_entries=1, ttl=None)
+def get_cached_vector_db(_embeddings):
+    """全局缓存 Chroma 向量数据库连接（复用已加载的 embedding）"""
+    from langchain_community.vectorstores import Chroma
+
+    return Chroma(
+        persist_directory="./chroma_db",
+        embedding_function=_embeddings,
+    )
 
 
 def generate_report_text(user_question, ocr_result, llm_answer, context_text):
@@ -452,12 +494,43 @@ def main():
                 image_path = save_uploaded_file(uploaded_file)
 
                 try:
-                    # 调用 RAG 系统
-                    result = process_query(user_text=user_input or "", image_path=image_path)
+                    # 【关键优化】预加载并注入全局缓存的模型，避免重复初始化爆内存
+                    cached_resources = {}
+                    try:
+                        cached_resources["ocr_reader"] = get_cached_ocr_reader()
+                        cached_resources["embeddings"] = get_cached_embeddings()
+                        cached_resources["vector_db"] = get_cached_vector_db(cached_resources["embeddings"])
+                    except Exception as init_err:  # noqa: F841
+                        # 模型初始化失败不阻断流程，交由 rag_system 内部懒加载兜底
+                        pass
+
+                    # 调用 RAG 系统（最外层 try-except 防止 Streamlit Cloud 崩溃）
+                    try:
+                        result = process_query(
+                            user_text=user_input or "",
+                            image_path=image_path,
+                            cached_resources=cached_resources,
+                        )
+                    except Exception as inner_err:  # noqa: BLE001
+                        # 内存溢出/API 超时等任何异常，都返回友好提示而非崩溃
+                        print(f"[CRITICAL] process_query 异常: {type(inner_err).__name__}: {inner_err}")
+                        traceback.print_exc()
+                        result = {
+                            "ocr_result": None,
+                            "llm_answer": "",
+                            "context_text": "",
+                            "user_text": user_input or "",
+                            "combined_query": user_input or "",
+                            "error": "⚠️ 服务器繁忙或检索超时，请稍后再试或简化输入问题。",
+                        }
+
                     render_result(result, user_input or "")
 
-                except Exception as e:
-                    st.error(f"❌ 系统处理时发生错误：\n\n**错误类型**：{type(e).__name__}\n\n**错误信息**：{str(e)}")
+                except Exception as e:  # noqa: BLE001
+                    # 最外层兜底：任何未预料的异常都不崩溃 UI
+                    print(f"[CRITICAL] 外层兜底异常: {type(e).__name__}: {e}")
+                    traceback.print_exc()
+                    st.error("⚠️ 服务器繁忙或检索超时，请稍后再试或简化输入问题。")
                     st.session_state.last_report_data = None
                     st.session_state.last_result = None
 
