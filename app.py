@@ -10,7 +10,54 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
+from datetime import datetime
 from rag_system import process_query
+
+
+def generate_report_text(user_question, ocr_result, llm_answer, context_text):
+    """生成研判报告文本字符串"""
+    lines = []
+    lines.append("=" * 60)
+    lines.append("外交领事智能研判报告")
+    lines.append("=" * 60)
+    lines.append(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+
+    # 用户问题
+    lines.append("【用户问题】")
+    lines.append("-" * 40)
+    lines.append(user_question if user_question else "（无文字提问）")
+    lines.append("")
+
+    # OCR 识别结果
+    if ocr_result and ocr_result.get("text"):
+        lines.append("【OCR 图片识别文字】")
+        lines.append("-" * 40)
+        lines.append(f"识别状态：{ocr_result.get('message', '')}")
+        lines.append("")
+        lines.append(ocr_result.get("text", ""))
+        lines.append("")
+
+    # 智能解答
+    if llm_answer:
+        lines.append("【智能解答内容】")
+        lines.append("-" * 40)
+        lines.append(llm_answer)
+        lines.append("")
+
+    # 检索依据
+    if context_text:
+        lines.append("【官方检索依据】")
+        lines.append("-" * 40)
+        lines.append(context_text)
+        lines.append("")
+
+    lines.append("=" * 60)
+    lines.append("本报告由「基于 RAG 的多模态领事服务与外交礼仪智能助手」生成")
+    lines.append("仅供参考，具体领事事务请联系当地使领馆或外交部全球热线 12308")
+    lines.append("=" * 60)
+
+    return "\n".join(lines)
 
 # ========== 页面配置 ==========
 st.set_page_config(
@@ -205,15 +252,17 @@ def render_sidebar():
         
         # 预设示例问题
         example_questions = [
-            "🇯🇵 在日本遇到突发地震，领事保护电话是多少？有什么社交禁忌？",
-            "🍽️ 涉外商务宴请中有哪些礼仪规范？座次如何安排？",
-            "🛂 中国公民在海外遗失护照应该如何补办？需要哪些材料？"
+            "🇯🇵 在日本遭遇突发地震怎么办？",
+            "👔 涉外商务拜访有什么服装礼仪规范？",
+            "🛂 海外护照过期如何申请紧急旅行证？"
         ]
-        
-        # 使用 session_state 存储选中的示例问题
+
+        # 点击示例按钮：填充文本框并自动触发研判
         for i, question in enumerate(example_questions):
             if st.button(question, key=f"example_{i}", use_container_width=True):
-                st.session_state.selected_question = question
+                st.session_state.user_input = question
+                st.session_state.trigger_query = True
+                st.rerun()
         
         st.markdown("---")
         
@@ -293,31 +342,28 @@ def render_ocr_result(ocr_result):
 
 
 def render_llm_answer(answer, context):
-    """渲染 LLM 回答和检索依据"""
+    """渲染 LLM 回答和检索依据（检索依据用 st.expander 折叠，默认收起）"""
     if not answer:
         return
-    
+
+    # ========== 智能解答区 ==========
     st.markdown("""
     <div class="result-card answer-card">
         <h3>🤖 智能助手解答</h3>
+    </div>
     """, unsafe_allow_html=True)
-    
+
     st.markdown(answer)
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-    
+
+    # ========== 参考依据区（折叠卡片，默认收起）==========
     if context:
-        st.markdown("""
-        <hr style="border-color: #c9a962; margin: 1.5rem 0;">
-        <div class="result-card">
-            <h3 style="color: #0F2C59; border-left: 4px solid #c9a962; padding-left: 0.75rem;">
-                📚 检索调用的参考依据
-            </h3>
-        """, unsafe_allow_html=True)
-        
-        st.markdown(context)
-        
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.expander("🔍 调用的官方领事与礼仪依据条款（点击展开/折叠）", expanded=False):
+            st.markdown("""
+            <div style="color: #0F2C59; font-weight: 600; margin-bottom: 0.5rem;">
+                📚 以下内容为从知识库中检索到的相关官方条款，供您参考：
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown(context)
 
 
 def main():
@@ -330,28 +376,35 @@ def main():
     
     # 主界面
     st.markdown("### 📝 信息输入")
-    
-    # 文本输入框（从 session_state 获取选中的示例问题）
-    default_text = st.session_state.get("selected_question", "")
+
+    # 初始化 session_state
+    if "user_input" not in st.session_state:
+        st.session_state.user_input = ""
+    if "trigger_query" not in st.session_state:
+        st.session_state.trigger_query = False
+    if "last_report_data" not in st.session_state:
+        st.session_state.last_report_data = None  # 保存最近一次研判的报告文本
+
+    # 文本输入框（绑定到 session_state，支持按钮自动填充）
     user_input = st.text_area(
         label="请输入您关于领事保护、外交礼仪、涉外事务等方面的问题：",
-        value=default_text,
+        key="user_input",
         height=150,
         placeholder="例如：在日本遇到突发地震，如何寻求领事保护？\n\n也可以上传护照、签证等证件图片，系统会自动识别图中文字并研判。",
         label_visibility="collapsed"
     )
-    
-    # 清除 session_state 中的选中问题（避免重复填充）
-    if "selected_question" in st.session_state:
-        del st.session_state.selected_question
-    
+
     # 提交按钮
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
         submit_button = st.button("🚀 提交智能研判", type="primary", use_container_width=True)
-    
-    # 处理提交
-    if submit_button:
+
+    # 处理提交（支持手动点击或示例按钮自动触发）
+    should_run = submit_button or st.session_state.get("trigger_query", False)
+    if st.session_state.get("trigger_query"):
+        st.session_state.trigger_query = False
+
+    if should_run:
         if not user_input and not uploaded_file:
             st.warning("⚠️ 请输入提问文本或上传证件图片后再提交。")
         else:
@@ -359,30 +412,46 @@ def main():
             with st.spinner("🔍 正在智能研判中..."):
                 # 保存上传的文件
                 image_path = save_uploaded_file(uploaded_file)
-                
+
                 try:
                     # 调用 RAG 系统
                     result = process_query(user_text=user_input or "", image_path=image_path)
-                    
+
                     # 渲染结果
                     st.markdown("---")
-                    
+
                     # OCR 结果
                     render_ocr_result(result.get("ocr_result"))
-                    
+
                     # 错误处理
                     if result.get("error"):
                         st.error(f"⚠️ 处理提示\n\n{result['error']}")
+                        st.session_state.last_report_data = None
                     else:
                         # LLM 回答
                         render_llm_answer(
                             result.get("llm_answer", ""),
                             result.get("context_text", "")
                         )
-                
+
+                        # 生成并保存报告文本（用于下载）
+                        llm_ans = result.get("llm_answer", "")
+                        ctx_text = result.get("context_text", "")
+                        if llm_ans or ctx_text:
+                            report_text = generate_report_text(
+                                user_question=user_input or "",
+                                ocr_result=result.get("ocr_result"),
+                                llm_answer=llm_ans,
+                                context_text=ctx_text,
+                            )
+                            st.session_state.last_report_data = report_text
+                        else:
+                            st.session_state.last_report_data = None
+
                 except Exception as e:
                     st.error(f"❌ 系统处理时发生错误：\n\n**错误类型**：{type(e).__name__}\n\n**错误信息**：{str(e)}")
-                
+                    st.session_state.last_report_data = None
+
                 finally:
                     # 清理临时文件
                     if image_path and os.path.exists(image_path):
@@ -391,7 +460,19 @@ def main():
                             os.rmdir(os.path.dirname(image_path))
                         except:  # noqa: E722
                             pass
-    
+
+    # ========== 导出研判报告按钮（仅当有研判结果时才显示）==========
+    if st.session_state.get("last_report_data"):
+        st.markdown("---")
+        st.download_button(
+            label="📥 一键导出研判报告",
+            data=st.session_state.last_report_data.encode("utf-8"),
+            file_name="外交领事智能研判报告.txt",
+            mime="text/plain",
+            use_container_width=False,
+            help="将本次研判的问题、解答和依据导出为文本文件",
+        )
+
     # 底部说明
     st.markdown("---")
     st.markdown("""
