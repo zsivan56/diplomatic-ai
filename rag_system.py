@@ -26,7 +26,11 @@ _ocr_reader = None
 
 
 def _get_llm():
-    """懒加载 LLM 实例"""
+    """懒加载 LLM 实例
+    密钥读取优先级（适配多平台）：
+      1. Streamlit Community Cloud: st.secrets["DEEPSEEK_API_KEY"]
+      2. 本地开发 / Hugging Face Spaces: os.environ["DEEPSEEK_API_KEY"]
+    """
     global _llm
 
     if _llm is not None:
@@ -34,13 +38,32 @@ def _get_llm():
 
     from langchain_openai import ChatOpenAI
 
-    # 优先从环境变量读取 API Key
-    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    # ===== 优先级 1：Streamlit Cloud st.secrets 注入 =====
+    api_key = ""
     base_url = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "DEEPSEEK_API_KEY" in st.secrets:
+            api_key = str(st.secrets["DEEPSEEK_API_KEY"]).strip()
+            if "DEEPSEEK_API_BASE" in st.secrets:
+                base_url = str(st.secrets["DEEPSEEK_API_BASE"]).strip()
+    except Exception:  # noqa: BLE001
+        # 非 Streamlit 环境下调用，st 可能不可用 / secrets 未加载
+        pass
+
+    # ===== 优先级 2：环境变量（本地 .env / HF Spaces Repository secrets） =====
+    if not api_key:
+        api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+        if os.getenv("DEEPSEEK_API_BASE"):
+            base_url = os.getenv("DEEPSEEK_API_BASE").strip()
 
     if not api_key:
         raise EnvironmentError(
-            "未检测到 DEEPSEEK_API_KEY，请在 Streamlit Cloud 的 Secrets 中设置该变量。"
+            "未检测到 DEEPSEEK_API_KEY。\n"
+            "👉 本地开发：请在项目根目录创建 .env 文件，写入 DEEPSEEK_API_KEY=sk-...\n"
+            "👉 Streamlit Cloud 部署：请在 App Settings → Secrets 中添加：\n"
+            "   DEEPSEEK_API_KEY = \"sk-...\"\n"
+            "   DEEPSEEK_API_BASE = \"https://api.deepseek.com\""
         )
 
     _llm = ChatOpenAI(

@@ -1,84 +1,77 @@
 # ============================================
 # 外交与领事多模态智能服务系统 - 依赖清单
-# Hugging Face Spaces 部署优化版本
-# - 纯 Python 包：锁定 minor 版本保证行为稳定
-# - 二进制重型包（torch/numpy/scipy/opencv/Pillow）：放宽版本，让 pip 选择匹配平台和 Python 版本的 wheel
-#   （HF Spaces 默认 Python 3.10/3.12，精确版本可能没有对应 wheel 导致从源码编译失败）
+# Streamlit Community Cloud (share.streamlit.io) 部署版本
+#
+# 关键策略：
+#   A) 纯 Python 顶层包：锁定精确 minor 版本，保证行为稳定
+#   B) 二进制重型包（torch/numpy/scipy/opencv/Pillow/scikit-image）：
+#      故意放宽为区间版本，让 pip 自动匹配 Python 版本 + CPU 架构的预编译 wheel
+#      避免从 C/C++ 源码编译导致 "installer returned non-zero exit code"
+#   C) langchain 家族：只锁定顶层包，传递依赖（langchain-core 等）交给 pip 自动解析
+#      否则极易出现 "ResolutionImpossible: version conflicts"
+#
+# Streamlit Cloud 预装：Python 3.10/3.11、Ubuntu 基础镜像
+# 系统库 libgl1 / libglib2.0-0 / libgomp1 / libjpeg 已包含，无需额外安装
 # ============================================
 
-# Web UI 界面
+# ===== Web UI 界面 =====
 streamlit==1.37.0
 
-# OCR 图像文字识别
+# ===== OCR 图像文字识别 =====
 easyocr==1.7.2
 
-# 大模型 API 调用
+# ===== 大模型 API 调用 =====
 openai==1.40.0
 
-# RAG 框架核心
-# 注意：langchain 家族内部依赖关系很严格，只锁定顶层包版本，
-# langchain-core / langchain-text-splitters 等传递依赖交给 pip 自动解析
-# langchain-community 0.2.14 被官方 yanked，使用 0.2.15+
+# ===== RAG 框架核心 =====
+# 只锁定顶层包，langchain-core/langchain-text-splitters 由 pip 传递解析
 langchain>=0.2.15,<0.3.0
 langchain-community>=0.2.15,<0.3.0
 langchain-huggingface==0.0.3
 langchain-openai==0.1.22
 
-# 向量数据库
+# ===== 向量数据库 =====
 chromadb==0.4.24
 
-# 文本嵌入模型
+# ===== 文本嵌入模型 =====
 sentence-transformers==2.7.0
 
-# PDF 文档处理
+# ===== PDF 文档处理 =====
 pypdf==4.3.1
 
-# 环境变量管理
+# ===== 环境变量管理（本地 .env 读取） =====
 python-dotenv==1.0.1
 
-# SSL 证书
+# ===== 基础工具（纯 Python，锁定版本即可） =====
 certifi>=2024.2.0
-
-# Hugging Face 模型下载
 huggingface-hub>=0.23.0,<1.0
-
-# ============================================
-# 以下为二进制重型包，故意不锁死精确版本
-# 让 pip 自动匹配 Python 版本 + CPU 架构的预编译 wheel
-# 避免从源码编译导致 installer returned non-zero exit code
-# ============================================
-
-# PyTorch (EasyOCR 和 embeddings 的底层依赖)
-# - CPU 版本即可，不需要 GPU
-torch>=2.0,<3.0
-torchvision>=0.15,<1.0
-
-# 图像处理库 (EasyOCR 依赖)
-# - Pillow 10.x/11.x 均可，不锁死 patch 避免编译失败
-opencv-python-headless>=4.8,<5.0
-Pillow>=10.0,<12.0
-numpy>=1.24,<2.0
-
-# 数据处理
 pydantic>=2.5,<3.0
 typing-extensions>=4.8,<5.0
-
-# 异步支持
 aiohttp>=3.9,<4.0
 httpcore>=1.0,<2.0
 httpx>=0.27,<1.0
-
-# 向量计算
-scipy>=1.10,<2.0
-
-# 正则表达式增强
 regex>=2024.0
-
-# YAML 解析
 pyyaml>=6.0
-
-# 进度条
 tqdm>=4.65
 
-# 网络搜索（联网检索能力）
+# ===== 网络搜索（联网检索能力） =====
 ddgs>=9.0.0
+
+# ============================================
+# 二进制重型包 — 版本区间策略（重点）
+# 这些包都带 C/C++ 扩展，精确锁版本在 Streamlit Cloud 容易踩：
+#   - 找不到匹配 Python 版本的 wheel → 从源码编译 → 失败
+#   - 编译依赖缺失 → installer returned non-zero exit code
+# 放宽后 pip 会自动挑一个有可用 wheel 的版本，成功率 99%+
+# ============================================
+
+# PyTorch CPU 版本（EasyOCR + sentence-transformers 底层依赖）
+# 区间覆盖 2.x 系列即可，不需要 GPU 支持
+torch>=2.0,<3.0
+torchvision>=0.15,<1.0
+
+# 图像处理 / 科学计算
+opencv-python-headless>=4.8,<5.0
+Pillow>=10.0,<12.0
+numpy>=1.24,<2.0
+scipy>=1.10,<2.0
