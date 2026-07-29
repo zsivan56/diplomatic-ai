@@ -1,50 +1,73 @@
-# =========================================================
-# Streamlit Cloud 专用：Python 3.12 兼容零锁版 requirements.txt
-#
-# 关键说明 1：runtime.txt 强制使用 python-3.12
-#   Python 3.12 上所有主流包都有成熟 wheel，永远不触发源码编译
-#
-# 关键说明 2：Pillow/numpy/scipy/torch/opencv 都不写具体版本，让 uv/pip 自动挑
-#   有对应 Python 3.12 wheel 的最新稳定版，成功率 100%
-# =========================================================
+# ============================================
+# 外交与领事多模态智能服务系统 - 依赖清单
+# Streamlit Cloud 部署版本
+# 关键依赖锁定版本,避免重建时因升级而 break
+# ============================================
 
-# --- 顶层功能包 ---
-streamlit>=1.30,<2.0
-easyocr
-openai
-pypdf
-python-dotenv
-ddgs
+# Web UI 界面
+streamlit==1.37.0
 
-# --- RAG 框架家族（只锁 major，不锁 minor，uv 会解传递依赖）---
-langchain>=0.2.0,<0.3.0
-langchain-community>=0.2.0,<0.3.0
-langchain-huggingface
-langchain-openai
-chromadb>=0.4.0,<0.5.0
-sentence-transformers
+# OCR 图像文字识别
+easyocr==1.7.2
 
-# --- 基础工具（纯 Python，无编译压力）---
-certifi
-huggingface-hub
-pydantic>=2.0,<3.0
-typing-extensions
-aiohttp
-httpcore
-httpx
-regex
-pyyaml
-tqdm
+# 大模型 API 调用
+openai==1.40.0
 
-# =========================================================
-# 以下带 C 扩展的重型包：
-# - 一律不锁版本！
-# - 依赖 resolver 会挑"当前 Python 3.12 + x86_64 有现成 wheel 的"最新稳定版
-# - 绝对避免从源码编译（那是 99% 的 installer non-zero 根源）
-# =========================================================
-torch
-torchvision
-opencv-python-headless
-Pillow
-numpy
-scipy
+# RAG 框架核心
+langchain==0.2.14
+langchain-community==0.2.14
+langchain-core==0.2.32
+langchain-text-splitters==0.2.2
+langchain-huggingface==0.0.3
+langchain-openai==0.1.22
+
+# 向量数据库
+chromadb==0.4.24
+
+# 文本嵌入模型
+sentence-transformers==2.7.0
+
+# PDF 文档处理
+pypdf==4.3.1
+
+# 环境变量管理
+python-dotenv==1.0.1
+
+# SSL 证书
+certifi==2024.7.4
+
+# Hugging Face 模型下载
+huggingface-hub==0.24.6
+
+# PyTorch (EasyOCR 和 embeddings 的底层依赖)
+torch==2.4.0
+torchvision==0.19.0
+
+# 图像处理库 (EasyOCR 依赖)
+opencv-python-headless==4.10.0.84
+Pillow==10.4.0
+numpy==1.26.4
+
+# 数据处理
+pydantic==2.8.2
+typing-extensions==4.12.2
+
+# 异步支持
+aiohttp==3.10.2
+httpcore==1.0.5
+httpx==0.27.0
+
+# 向量计算
+scipy==1.13.1
+
+# 正则表达式增强
+regex==2024.7.24
+
+# YAML 解析
+pyyaml==6.0.2
+
+# 进度条
+tqdm==4.66.5
+
+# 网络搜索（联网检索能力）
+ddgs==9.0.0

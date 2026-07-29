@@ -488,34 +488,9 @@ def main():
         uploaded_file = st.file_uploader(
             label="上传护照、签证、告示等证件图片",
             type=['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif', 'webp'],
-            help="支持格式：JPG、PNG、BMP、TIFF、WebP，单张不超过 20MB，建议图片清晰、文字正面朝上",
+            help="支持格式：JPG、PNG、BMP、TIFF、WebP，建议图片清晰、文字正面朝上",
             label_visibility="collapsed"
         )
-
-        # ===== 新增：上传后即时显示图片预览 + 大小提示 =====
-        if uploaded_file is not None:
-            try:
-                file_size_mb = uploaded_file.size / (1024 * 1024)
-                size_color = "#38A169" if file_size_mb <= 5 else "#D69E2E" if file_size_mb <= 15 else "#E53E3E"
-                st.markdown(
-                    f"<div style='font-size: 12px; color: {size_color}; margin-bottom: 6px;'>"
-                    f"📎 已上传：{uploaded_file.name} · {file_size_mb:.2f} MB</div>",
-                    unsafe_allow_html=True
-                )
-                # 显示缩略图预览（固定宽度，不占太多空间）
-                st.image(
-                    uploaded_file,
-                    caption="图片预览（点击放大）",
-                    use_column_width="auto",
-                    width=280,
-                    clamp=True,
-                    output_format="JPEG",
-                )
-                # 重置文件指针，供后续 save_uploaded_file 使用
-                uploaded_file.seek(0)
-            except Exception as preview_err:  # noqa: BLE001
-                st.warning(f"⚠️ 图片预览失败：{preview_err}，但仍可提交识别。")
-                uploaded_file.seek(0)
 
         st.markdown("---")
 
@@ -622,82 +597,57 @@ def main():
             with tab_answer:
                 st.warning("⚠️ 请输入提问文本或上传证件图片后再提交。")
         else:
-            # ===== 分步骤进度展示容器 =====
-            with tab_answer:
-                progress_placeholder = st.empty()
-                status_box = progress_placeholder.container()
-                with status_box:
-                    status_1 = st.status("📦 初始化资源与上传处理...", expanded=True)
-
-            try:
-                # ===== 步骤 1：保存上传文件 =====
-                with status_1:
-                    st.write("📥 保存上传图片到临时目录...")
+            # 显示加载状态
+            with st.spinner("🔍 正在智能研判中..."):
+                # 保存上传的文件
                 image_path = save_uploaded_file(uploaded_file)
 
-                # ===== 步骤 2：预加载全局缓存的模型 =====
-                with status_1:
-                    st.write("🧠 加载 AI 模型（首次使用需等待几秒钟）...")
-                cached_resources = {}
                 try:
-                    # 顺序加载，避免同时加载爆内存
-                    cached_resources["ocr_reader"] = get_cached_ocr_reader()
-                    cached_resources["embeddings"] = get_cached_embeddings()
-                    cached_resources["vector_db"] = get_cached_vector_db(cached_resources["embeddings"])
-                except Exception as init_err:  # noqa: F841
-                    print(f"[INIT] 资源预加载警告（将使用懒加载回退）: {init_err}")
-
-                # ===== 步骤 3：OCR 识别 =====
-                if image_path:
-                    with status_1:
-                        status_1.update(label="📷 正在进行图片 OCR 识别（约 5-30 秒）...", expanded=True)
-                        st.write("🔍 图片文字提取中，大图片会自动压缩处理...")
-
-                # ===== 步骤 4：调用 RAG 系统（OCR + 搜索 + 检索 + LLM）=====
-                with status_1:
-                    if image_path:
-                        st.write("🌐 网络搜索 + 📚 知识库匹配 + 🤖 智能研判中...")
-                    else:
-                        st.write("🌐 网络搜索 + 📚 知识库匹配 + 🤖 智能研判中...")
-
-                try:
-                    result = process_query(
-                        user_text=user_input or "",
-                        image_path=image_path,
-                        cached_resources=cached_resources,
-                    )
-                except Exception as inner_err:  # noqa: BLE001
-                    print(f"[CRITICAL] process_query 异常: {type(inner_err).__name__}: {inner_err}")
-                    traceback.print_exc()
-                    result = {
-                        "ocr_result": None,
-                        "llm_answer": "",
-                        "context_text": "",
-                        "user_text": user_input or "",
-                        "combined_query": user_input or "",
-                        "error": "⚠️ 服务器繁忙或检索超时，请稍后再试或简化输入问题。",
-                    }
-
-                # ===== 步骤 5：完成，清除进度状态并渲染结果 =====
-                progress_placeholder.empty()
-                render_result(result, user_input or "")
-
-            except Exception as e:  # noqa: BLE001
-                print(f"[CRITICAL] 外层兜底异常: {type(e).__name__}: {e}")
-                traceback.print_exc()
-                progress_placeholder.empty()
-                with tab_answer:
-                    st.error("⚠️ 服务器繁忙或检索超时，请稍后再试或简化输入问题。")
-                st.session_state.last_report_data = None
-                st.session_state.last_result = None
-
-            finally:
-                if image_path and os.path.exists(image_path):
+                    # 预加载并注入全局缓存的模型
+                    cached_resources = {}
                     try:
-                        os.remove(image_path)
-                        os.rmdir(os.path.dirname(image_path))
-                    except Exception:  # noqa: BLE001
+                        cached_resources["ocr_reader"] = get_cached_ocr_reader()
+                        cached_resources["embeddings"] = get_cached_embeddings()
+                        cached_resources["vector_db"] = get_cached_vector_db(cached_resources["embeddings"])
+                    except Exception as init_err:  # noqa: F841
                         pass
+
+                    # 调用 RAG 系统
+                    try:
+                        result = process_query(
+                            user_text=user_input or "",
+                            image_path=image_path,
+                            cached_resources=cached_resources,
+                        )
+                    except Exception as inner_err:  # noqa: BLE001
+                        print(f"[CRITICAL] process_query 异常: {type(inner_err).__name__}: {inner_err}")
+                        traceback.print_exc()
+                        result = {
+                            "ocr_result": None,
+                            "llm_answer": "",
+                            "context_text": "",
+                            "user_text": user_input or "",
+                            "combined_query": user_input or "",
+                            "error": "⚠️ 服务器繁忙或检索超时，请稍后再试或简化输入问题。",
+                        }
+
+                    render_result(result, user_input or "")
+
+                except Exception as e:  # noqa: BLE001
+                    print(f"[CRITICAL] 外层兜底异常: {type(e).__name__}: {e}")
+                    traceback.print_exc()
+                    with tab_answer:
+                        st.error("⚠️ 服务器繁忙或检索超时，请稍后再试或简化输入问题。")
+                    st.session_state.last_report_data = None
+                    st.session_state.last_result = None
+
+                finally:
+                    if image_path and os.path.exists(image_path):
+                        try:
+                            os.remove(image_path)
+                            os.rmdir(os.path.dirname(image_path))
+                        except Exception:  # noqa: BLE001
+                            pass
     elif st.session_state.get("last_result"):
         # 页面重新运行时恢复显示上一次的研判结果
         render_result(
