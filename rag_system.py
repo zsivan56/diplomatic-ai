@@ -247,6 +247,40 @@ def extract_text_from_image(image_path: Optional[str]) -> Dict[str, Any]:
         return result
 
 
+def format_context_with_metadata(relevant_docs):
+    """
+    将检索到的文档片段格式化为结构化的 Markdown 输出
+    格式：
+    ---
+    📌 **依据 [序号]**
+    • **权威来源**：[来源文件名]
+    • **发布/发布机构**：[authority]
+    • **调取的原条文节选**：
+      > "[具体检索到的文本片段...]"
+    ---
+    """
+    formatted_parts = []
+
+    for i, doc in enumerate(relevant_docs, 1):
+        # 提取元数据
+        metadata = doc.metadata if hasattr(doc, 'metadata') else {}
+        source_title = metadata.get("source_title", "未知来源")
+        authority = metadata.get("authority", "未知机构")
+        page_content = doc.page_content if hasattr(doc, 'page_content') else str(doc)
+
+        # 格式化单个依据
+        formatted_part = f"""---
+📌 **依据 [{i}]**
+• **权威来源**：{source_title}
+• **发布/发布机构**：{authority}
+• **调取的原条文节选**：
+  > "{page_content.strip()}"
+---"""
+        formatted_parts.append(formatted_part)
+
+    return "\n\n".join(formatted_parts)
+
+
 def process_query(user_text: str = "", image_path: Optional[str] = None) -> Dict[str, Any]:
     """
     核心处理函数：融合 CV 提取结果与 RAG 知识库检索。
@@ -307,15 +341,14 @@ def process_query(user_text: str = "", image_path: Optional[str] = None) -> Dict
     try:
         # 懒加载检索器
         retriever = _get_retriever()
-        
+
         print(f"[RAG] 正在检索知识库中的相关条款，查询长度={len(combined_query)}...")
         relevant_docs = retriever.invoke(combined_query)
-        
-        context_text = "\n\n".join(
-            [f"[依据 {i + 1}]: {doc.page_content}" for i, doc in enumerate(relevant_docs)]
-        )
+
+        # 使用结构化格式化函数
+        context_text = format_context_with_metadata(relevant_docs)
         output["context_text"] = context_text
-        
+
     except Exception as e:  # noqa: BLE001
         output["error"] = f"知识库检索失败：{type(e).__name__}: {e}"
         return output
