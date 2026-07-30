@@ -328,7 +328,9 @@ def _humanize_title(title: str, url: str) -> str:
 def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
     """
     使用 DuckDuckGo 搜索网络信息，返回结构化搜索结果。
-    策略：优先搜索官方权威域名(mfa.gov.cn)，不足再用普通搜索补齐。
+    策略：普通关键词搜索（中文 + 领域强化词），然后按域名过滤，
+    把官方结果（cs.mfa.gov.cn / mfa.gov.cn）排到前面，
+    不使用 site: 语法（海外服务器上 site: 常返回 0 条）。
     每条结果包含：title, source(域名), snippet, url, is_official
     """
     try:
@@ -336,82 +338,68 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
 
         print(f"[Web Search] 正在搜索：{query[:60]}...")
 
-        # 去除用户问题里可能干扰 site: 语法的内容
+        # 去除多余空白字符
         clean_query = re.sub(r'\s+', ' ', query).strip()
 
-        # 官方权威域名白名单
-        # 注意:www.gov.cn 的 site: 语法会匹配所有 gov.cn 子域(含消防/教育等无关站点),
-        # 故只保留领事/外交相关的具体子域,避免搜出无关政府内容
-        official_domains = [
-            "cs.mfa.gov.cn",      # 中国领事服务网(最相关)
-            "mfa.gov.cn",         # 中国外交部
-            "www.mfa.gov.cn",     # 外交部(带 www)
-        ]
+        # 官方域名白名单（用于搜索后过滤标记）
+        OFFICIAL_DOMAINS = {
+            "cs.mfa.gov.cn", "mfa.gov.cn", "www.mfa.gov.cn",
+            "www.gov.cn", "gov.cn",
+        }
+
+        # 只要官方域名后缀命中（含子域）即算官方
+        def _is_official(domain: str) -> bool:
+            return any(
+                domain == d or domain.endswith("." + d)
+                for d in OFFICIAL_DOMAINS
+            )
 
         formatted = []
         seen_urls = set()
 
-        # 第一轮：限定官方域名搜索(每个域名单独搜,提升命中)
-        for domain in official_domains:
-            if len(formatted) >= max_results:
-                break
-            try:
-                site_query = f"{clean_query} site:{domain}"
-                raw_results = list(DDGS().text(site_query, max_results=2))
-                for r in raw_results:
-                    url = r.get("href", r.get("link", ""))
-                    if not url or url in seen_urls:
-                        continue
-                    title = r.get("title", "")
-                    snippet = r.get("body", r.get("snippet", ""))
-                    if not (title and snippet):
-                        continue
-                    seen_urls.add(url)
-                    formatted.append({
-                        "title": _humanize_title(title, url),
-                        "source": urlparse(url).netloc or domain,
-                        "snippet": snippet,
-                        "url": url,
-                        "is_official": True,
-                    })
-                    if len(formatted) >= max_results:
-                        break
-            except Exception as e:  # noqa: BLE001
-                print(f"[Web Search] 官方域名 {domain} 搜索失败: {e}")
-                continue
+        # 第一轮：普通搜索（带领域强化词）
+        # 海外服务器上 site: cs.mfa.gov.cn 几乎搜不到结果，
+        # 用关键词强化（外交部 领事 礼仪 出国 安全 签证）+ 后过滤更可靠
+        boosted_query = f"{clean_query} 外交部 领事"
+        try:
+            raw_results = list(DDGS().text(boosted_query, max_results=max_results + 3))
+        except Exception as e:  # noqa: BLE001
+            print(f"[Web Search] 第一轮(boosted)搜索失败: {e}")
+            raw_results = []
 
-        # 第二轮：官方结果不足,用普通搜索补齐(加入领域关键词)
-        if len(formatted) < max_results:
+        # 第一轮没结果时，第二轮：不加领域词的纯用户问题
+        if not raw_results:
             try:
-                general_query = f"{clean_query} 领事保护 外交部"
-                remaining = max_results - len(formatted)
-                raw_results = list(DDGS().text(general_query, max_results=remaining + 2))
-                for r in raw_results:
-                    if len(formatted) >= max_results:
-                        break
-                    url = r.get("href", r.get("link", ""))
-                    if not url or url in seen_urls:
-                        continue
-                    title = r.get("title", "")
-                    snippet = r.get("body", r.get("snippet", ""))
-                    if not (title and snippet):
-                        continue
-                    seen_urls.add(url)
-                    domain = urlparse(url).netloc or "未知来源"
-                    # 判断是否命中官方域名
-                    is_off = any(
-                        domain == d or domain.endswith("." + d)
-                        for d in official_domains
-                    )
-                    formatted.append({
-                        "title": _humanize_title(title, url),
-                        "source": domain,
-                        "snippet": snippet,
-                        "url": url,
-                        "is_official": is_off,
-                    })
+                raw_results = list(DDGS().text(clean_query, max_results=max_results + 3))
             except Exception as e:  # noqa: BLE001
-                print(f"[Web Search] 普通搜索失败: {e}")
+                print(f"[Web Search] 第二轮(plain)搜索失败: {e}")
+                raw_results = []
+
+        for r in raw_results:
+            if len(formatted) >= max_results + 3:  # 多取 3 条用于后过滤排序
+                break
+            url = r.get("href", r.get("link", ""))
+            if not url or url in seen_urls:
+                continue
+            title = r.get("title", "")
+            snippet = r.get("body", r.get("snippet", ""))
+            if not (title and snippet):
+                continue
+            seen_urls.add(url)
+            domain = urlparse(url).netloc or "未知来源"
+            formatted.append({
+                "title": _humanize_title(title, url),
+                "source": domain,
+                "snippet": snippet,
+                "url": url,
+                "is_official": _is_official(domain),
+            })
+
+        # 排序：官方结果优先，然后按原顺序
+        formatted.sort(key=lambda x: (not x["is_official"]))
+
+        # 只取前 max_results 条
+        formatted = formatted[:max_results]
 
         print(f"[Web Search] 获取到 {len(formatted)} 条网络搜索结果"
               f"（官方 {sum(1 for r in formatted if r.get('is_official'))} 条）")
@@ -572,21 +560,30 @@ def _process_query_inner(
     # ========== 模块 C: 网络搜索（主要信息来源）==========
     web_results = []
     web_evidence_text = ""
+    web_search_diag = ""  # 诊断:失败原因,用于兜底提示
     try:
         web_results = search_web(combined_query, max_results=3)
         web_evidence_text = format_web_evidence(web_results)
+        if not web_results:
+            web_search_diag = "搜索引擎未返回有效结果（可能因服务器网络区域限制）"
     except Exception as e:  # noqa: BLE001
         print(f"[Web Search] 异常: {e}")
+        web_search_diag = f"搜索异常：{type(e).__name__}: {e}"
 
     # ========== 模块 D: 本地知识库检索（纠正幻觉）==========
     local_db_text = ""
+    local_db_diag = ""
     try:
         retriever = _get_retriever(cached_resources)
         print(f"[RAG] 正在检索本地知识库校验条款...")
         relevant_docs = retriever.invoke(combined_query)
         local_db_text = format_local_db_reference(relevant_docs)
+        if not relevant_docs:
+            local_db_diag = "知识库未检索到匹配片段"
     except Exception as e:  # noqa: BLE001
-        print(f"[RAG] 本地知识库检索失败: {e}")
+        local_db_err = f"{type(e).__name__}: {e}"
+        print(f"[RAG] 本地知识库检索失败: {local_db_err}")
+        local_db_diag = local_db_err
 
     # 合并展示：网络依据 + 知识库校验
     context_parts = []
@@ -598,14 +595,17 @@ def _process_query_inner(
     context_text = "\n\n".join(context_parts) if context_parts else ""
     output["context_text"] = context_text
 
-    if not context_text:
-        output["error"] = "网络搜索与本地知识库均未获取到有效参考信息，请稍后重试。"
-        return output
+    # 诊断信息,用于 LLM fallback 时显示给用户
+    retrieval_hint_parts = []
+    if web_search_diag:
+        retrieval_hint_parts.append(f"• 🌐 网络搜索：{web_search_diag}")
+    if local_db_diag:
+        retrieval_hint_parts.append(f"• 📚 本地知识库：{local_db_diag}")
+    retrieval_hint = "\n".join(retrieval_hint_parts)
 
-    # 网络搜索失败但本地知识库有结果时,继续流程(不再直接报错)
-    web_search_failed = not web_evidence_text
-    if web_search_failed:
-        print("[Web Search] 网络搜索无结果,仅依据本地知识库继续")
+    # 任何一边有结果就正常继续(不再报错)
+    # 两边都空时也继续走 LLM fallback,不直接报错,但在 LLM 回答前加免责声明
+    fallback_mode = (not context_text)
 
     # ========== 模块 E: 构建 Prompt 并调用 LLM ==========
     try:
@@ -614,7 +614,23 @@ def _process_query_inner(
         # 懒加载 LLM
         llm = _get_llm()
 
-        system_content = f"""你是一名专业的外交领事与涉外礼仪智能助手。
+        if fallback_mode:
+            # 检索全空:fallback 模式,LLM 仅能基于自身训练知识回答,
+            # 必须严格免责 + 严禁捏造法规/电话等事实信息
+            system_content = f"""你是一名专业的外交领事与涉外礼仪智能助手。
+
+⚠️ 【重要警示】: 本次查询网络搜索与本地知识库均未获取到有效参考依据。
+你只能基于自己的训练知识给出**一般性的建议或指引**,不可当作最终权威结论。
+
+【回答必须遵守】:
+1. 开头必须先声明:「⚠️ 提示：本次未检索到实时官方资料，以下仅为一般性参考指引，请以中华人民共和国外交部 12308 领事保护热线或当地使领馆官方答复为准。」
+2. 严禁捏造或杜撰任何具体的法律法规条文、电话号码、签证要求或具体国别政策。
+3. 涉及领事应急/证件办理/法规效力类问题,必须明确引导用户拨打 12308 或查询 cs.mfa.gov.cn 官方渠道。
+4. 回答应礼貌、严谨,不给出绝对性承诺。
+
+【用户问题】: {combined_query}"""
+        else:
+            system_content = f"""你是一名专业的外交领事与涉外礼仪智能助手。
 请结合以下参考依据，回答用户的问题或对证件信息给出提醒。
 
 【依据说明】
@@ -642,7 +658,23 @@ def _process_query_inner(
             SystemMessage(content=system_content),
             HumanMessage(content=user_content),
         ])
-        output["llm_answer"] = response.content
+        llm_text = response.content
+
+        # Fallback 模式:在回答前置诊断提示(便于用户直观看到哪一步失败)
+        if fallback_mode:
+            diag_lines = ["### ⚠️ 检索状态说明"]
+            diag_lines.append("")
+            diag_lines.append("本次未能获取到实时或本地参考依据,已切换为通用知识答复模式:")
+            diag_lines.append("")
+            diag_lines.append(retrieval_hint or "• 未知原因")
+            diag_lines.append("")
+            diag_lines.append("如需获得权威答案,建议稍后重试,或直接拨打外交部 12308 领事保护热线。")
+            diag_lines.append("")
+            diag_lines.append("---")
+            diag_lines.append("")
+            llm_text = "\n".join(diag_lines) + llm_text
+
+        output["llm_answer"] = llm_text
 
     except Exception as e:  # noqa: BLE001
         output["error"] = f"大模型调用失败：{type(e).__name__}: {e}"
