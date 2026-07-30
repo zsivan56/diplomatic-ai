@@ -328,7 +328,9 @@ def _humanize_title(title: str, url: str) -> str:
 def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
     """
     使用 DuckDuckGo 搜索网络信息，返回结构化搜索结果。
-    最简版:用户问题 + 领域强化词,直接搜索。
+    策略：普通关键词搜索（中文 + 领域强化词），然后按域名过滤，
+    把官方结果（cs.mfa.gov.cn / mfa.gov.cn）排到前面，
+    不使用 site: 语法（海外服务器上 site: 常返回 0 条）。
     每条结果包含：title, source(域名), snippet, url, is_official
     """
     try:
@@ -339,25 +341,40 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
         # 去除多余空白字符
         clean_query = re.sub(r'\s+', ' ', query).strip()
 
-        # 官方域名白名单（用于搜索后过滤标记）
-        OFFICIAL_DOMAINS = {
-            "cs.mfa.gov.cn", "mfa.gov.cn", "www.mfa.gov.cn",
-            "www.gov.cn", "gov.cn",
-        }
+        # 官方域名白名单(用于搜索后过滤标记),与 _OFFICIAL_AUTHORITY_MAP 保持一致
+        OFFICIAL_DOMAINS = set(_OFFICIAL_AUTHORITY_MAP.keys())
 
+        # 只要官方域名后缀命中（含子域）即算官方
         def _is_official(domain: str) -> bool:
             return any(
                 domain == d or domain.endswith("." + d)
                 for d in OFFICIAL_DOMAINS
             )
 
-        # 最简搜索:用户问题 + 领域强化词
-        search_query = f"{clean_query} 领事保护 外交部"
-        raw_results = list(DDGS().text(search_query, max_results=max_results))
-
         formatted = []
         seen_urls = set()
+
+        # 第一轮：普通搜索（带领域强化词）
+        # 海外服务器上 site: cs.mfa.gov.cn 几乎搜不到结果，
+        # 用关键词强化（外交部 领事 礼仪 出国 安全 签证）+ 后过滤更可靠
+        boosted_query = f"{clean_query} 外交部 领事"
+        try:
+            raw_results = list(DDGS().text(boosted_query, max_results=max_results + 3))
+        except Exception as e:  # noqa: BLE001
+            print(f"[Web Search] 第一轮(boosted)搜索失败: {e}")
+            raw_results = []
+
+        # 第一轮没结果时，第二轮：不加领域词的纯用户问题
+        if not raw_results:
+            try:
+                raw_results = list(DDGS().text(clean_query, max_results=max_results + 3))
+            except Exception as e:  # noqa: BLE001
+                print(f"[Web Search] 第二轮(plain)搜索失败: {e}")
+                raw_results = []
+
         for r in raw_results:
+            if len(formatted) >= max_results + 3:  # 多取 3 条用于后过滤排序
+                break
             url = r.get("href", r.get("link", ""))
             if not url or url in seen_urls:
                 continue
@@ -375,6 +392,12 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
                 "is_official": _is_official(domain),
             })
 
+        # 排序：官方结果优先，然后按原顺序
+        formatted.sort(key=lambda x: (not x["is_official"]))
+
+        # 只取前 max_results 条
+        formatted = formatted[:max_results]
+
         print(f"[Web Search] 获取到 {len(formatted)} 条网络搜索结果"
               f"（官方 {sum(1 for r in formatted if r.get('is_official'))} 条）")
         return formatted
@@ -384,11 +407,32 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
         return []
 
 
+# 官方域名 → 规范机构名映射(用于检索依据的"官方机构"字段)
+_OFFICIAL_AUTHORITY_MAP = {
+    "cs.mfa.gov.cn": "中国领事服务网",
+    "mfa.gov.cn": "中华人民共和国外交部",
+    "www.mfa.gov.cn": "中华人民共和国外交部",
+    "fmprc.gov.cn": "中华人民共和国外交部",
+    "www.fmprc.gov.cn": "中华人民共和国外交部",
+    "china-consulate.gov.cn": "中华人民共和国驻外使领馆",
+    "www.gov.cn": "中国政府网",
+    "gov.cn": "中国政府网",
+    "npc.gov.cn": "全国人民代表大会常务委员会",
+}
+
+
+def _resolve_authority(domain: str) -> str:
+    """根据域名解析对应的官方机构名;无法识别时返回'第三方网络来源'。"""
+    for key, name in _OFFICIAL_AUTHORITY_MAP.items():
+        if domain == key or domain.endswith("." + key):
+            return name
+    return "第三方网络来源"
+
+
 def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
     """
-    将网络搜索结果格式化为结构化的「依据」卡片。
-    注意:网络搜索结果为搜索引擎返回的网页摘要,并非法规原文,
-    标注须如实反映其性质,避免误导用户。
+    将网络搜索结果格式化为规范的「依据」卡片。
+    字段统一为:文件标题 / 官方机构 / 原句引用。
     """
     if not web_results:
         return ""
@@ -396,18 +440,20 @@ def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
     formatted_parts = []
     for i, result in enumerate(web_results, 1):
         title = result.get("title", "未知标题")
-        source = result.get("source", "未知来源")  # 实为域名
+        source = result.get("source", "未知来源")
         snippet = result.get("snippet", "无摘要")
         url = result.get("url", "")
         is_official = result.get("is_official", False)
 
+        # 官方机构:从域名解析规范名称
+        authority = _resolve_authority(source)
         trust_label = "🏛 官方来源" if is_official else "📰 第三方网页"
 
         formatted_part = f"""---
-🌐 **网络搜索结果 [{i}]**  `{trust_label}`
-• **网页标题**：{title}
-• **来源域名**：{source}
-• **网页摘要**（搜索引擎返回，非法规原文，仅供参考）：
+🌐 **网络检索依据 [{i}]**  `{trust_label}`
+• **文件标题**：{title}
+• **官方机构**：{authority}
+• **原句引用**：
   > "{snippet.strip()}"
 {f"• **链接**：{url}" if url else ""}
 ---"""
@@ -419,8 +465,7 @@ def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
 def format_local_db_reference(relevant_docs) -> str:
     """
     将本地知识库检索结果格式化为「知识库校验」卡片。
-    知识库源文件为官方指导性文档（如《中国领事保护与协助指南》），
-    非严格意义上的法规条文，标注须如实反映。
+    字段统一为:文件标题 / 官方机构 / 原句引用。
     """
     if not relevant_docs:
         return ""
@@ -433,10 +478,10 @@ def format_local_db_reference(relevant_docs) -> str:
         page_content = doc.page_content if hasattr(doc, 'page_content') else str(doc)
 
         formatted_part = f"""---
-📚 **知识库校验 [{i}]**  `🏛 官方指导文档`
-• **文件名称**：{source_title}
-• **发布机构**：{authority}
-• **知识库文档节选**：
+📚 **知识库校验依据 [{i}]**  `🏛 官方指导文档`
+• **文件标题**：{source_title}
+• **官方机构**：{authority}
+• **原句引用**：
   > "{page_content.strip()}"
 ---"""
         formatted_parts.append(formatted_part)
@@ -536,7 +581,8 @@ def _process_query_inner(
     web_evidence_text = ""
     web_search_diag = ""  # 诊断:失败原因,用于兜底提示
     try:
-        web_results = search_web(combined_query, max_results=3)
+        # 主要数据来源:网络搜索,取 5 条
+        web_results = search_web(combined_query, max_results=5)
         web_evidence_text = format_web_evidence(web_results)
         if not web_results:
             web_search_diag = "搜索引擎未返回有效结果（可能因服务器网络区域限制）"
@@ -620,14 +666,14 @@ def _process_query_inner(
 请结合以下参考依据，回答用户的问题或对证件信息给出提醒。
 
 【依据说明】
-- 🌐 网络搜索结果：搜索引擎返回的网页摘要，非法规原文。其中「官方来源」可信度高，「第三方网页」仅供参考。
-- 📚 知识库校验：官方指导性文档节选，可信度最高，作为核实与纠错依据。
+- 🌐 网络检索依据：主要数据来源。其中「🏛 官方来源」可信度高，「📰 第三方网页」仅供参考。
+- 📚 知识库校验依据：辅助校验,用于核实网络信息、纠正幻觉,作为补充依据。
 
 【回答要求】
 1. 态度严谨、礼貌，符合外交礼仪规范。
-2. 优先采信「🏛 官方来源」网络结果与「📚 知识库校验」；对「📰 第三方网页」内容需谨慎，不可作为事实依据。
+2. 优先采信「🏛 官方来源」网络依据与「📚 知识库校验依据」；对「📰 第三方网页」内容需谨慎,不可作为事实依据。
 3. 切勿捏造条款、电话号码、法规条文。若依据中无相关信息，明确告知用户建议查询官方渠道（外交部 12308 热线）。
-4. 标注回答所参考的依据编号（如「网络搜索结果 [1]」「知识库校验 [2]」）。
+4. 标注回答所参考的依据编号（如「网络检索依据 [1]」「知识库校验依据 [2]」）。
 
 【参考依据】：
 {context_text}"""
