@@ -328,9 +328,7 @@ def _humanize_title(title: str, url: str) -> str:
 def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
     """
     使用 DuckDuckGo 搜索网络信息，返回结构化搜索结果。
-    策略：普通关键词搜索（中文 + 领域强化词），然后按域名过滤，
-    把官方结果（cs.mfa.gov.cn / mfa.gov.cn）排到前面，
-    不使用 site: 语法（海外服务器上 site: 常返回 0 条）。
+    最简版:用户问题 + 领域强化词,直接搜索。
     每条结果包含：title, source(域名), snippet, url, is_official
     """
     try:
@@ -347,37 +345,19 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
             "www.gov.cn", "gov.cn",
         }
 
-        # 只要官方域名后缀命中（含子域）即算官方
         def _is_official(domain: str) -> bool:
             return any(
                 domain == d or domain.endswith("." + d)
                 for d in OFFICIAL_DOMAINS
             )
 
+        # 最简搜索:用户问题 + 领域强化词
+        search_query = f"{clean_query} 领事保护 外交部"
+        raw_results = list(DDGS().text(search_query, max_results=max_results))
+
         formatted = []
         seen_urls = set()
-
-        # 第一轮：普通搜索（带领域强化词）
-        # 海外服务器上 site: cs.mfa.gov.cn 几乎搜不到结果，
-        # 用关键词强化（外交部 领事 礼仪 出国 安全 签证）+ 后过滤更可靠
-        boosted_query = f"{clean_query} 外交部 领事"
-        try:
-            raw_results = list(DDGS().text(boosted_query, max_results=max_results + 3))
-        except Exception as e:  # noqa: BLE001
-            print(f"[Web Search] 第一轮(boosted)搜索失败: {e}")
-            raw_results = []
-
-        # 第一轮没结果时，第二轮：不加领域词的纯用户问题
-        if not raw_results:
-            try:
-                raw_results = list(DDGS().text(clean_query, max_results=max_results + 3))
-            except Exception as e:  # noqa: BLE001
-                print(f"[Web Search] 第二轮(plain)搜索失败: {e}")
-                raw_results = []
-
         for r in raw_results:
-            if len(formatted) >= max_results + 3:  # 多取 3 条用于后过滤排序
-                break
             url = r.get("href", r.get("link", ""))
             if not url or url in seen_urls:
                 continue
@@ -394,12 +374,6 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
                 "url": url,
                 "is_official": _is_official(domain),
             })
-
-        # 排序：官方结果优先，然后按原顺序
-        formatted.sort(key=lambda x: (not x["is_official"]))
-
-        # 只取前 max_results 条
-        formatted = formatted[:max_results]
 
         print(f"[Web Search] 获取到 {len(formatted)} 条网络搜索结果"
               f"（官方 {sum(1 for r in formatted if r.get('is_official'))} 条）")
