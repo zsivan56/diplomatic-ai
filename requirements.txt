@@ -70,5 +70,8 @@ pyyaml==6.0.2
 # 进度条
 tqdm==4.66.5
 
-# 网络搜索（联网检索能力）
+# HTTP 请求（网络搜索直接请求 DuckDuckGo HTML 接口）
+requests>=2.31.0
+
+# 网络搜索（ddgs 作为 fallback 后端）
 ddgs==9.0.0

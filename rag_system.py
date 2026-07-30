@@ -431,108 +431,172 @@ def _resolve_authority(domain: str) -> str:
     return "第三方网络来源"
 
 
+def _is_official_domain(domain: str) -> bool:
+    """检查域名是否属于官方白名单"""
+    return _resolve_authority(domain) != "第三方网络来源"
+
+
+def _search_ddg_html(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """
+    直接用 requests 请求 DuckDuckGo HTML 搜索接口。
+    绕过 ddgs 9.0.0 的 Bing 后端，获取更高质量的中文搜索结果。
+    返回结构化结果列表。
+    """
+    import requests
+    from urllib.parse import parse_qs, urlparse, unquote
+
+    url = "https://html.duckduckgo.com/html/"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://html.duckduckgo.com/",
+    }
+    # DuckDuckGo HTML 接口用 POST 方式
+    data = {"q": query, "b": ""}
+
+    try:
+        resp = requests.post(url, data=data, headers=headers, timeout=15)
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as e:  # noqa: BLE001
+        print(f"[DDG HTML] 请求失败: {type(e).__name__}: {e}")
+        return []
+
+    # DuckDuckGo HTML 版本搜索结果解析
+    # 每个结果块以 result__a 链接开头，用 uddg= 参数做 redirect
+    # 提取所有包含 uddg= 的链接
+    link_pattern = re.compile(
+        r'<a[^>]*class="result__a"[^>]*href="(https?://[^"]*uddg=[^"]*)"[^>]*>(.*?)</a>',
+        re.DOTALL | re.IGNORECASE,
+    )
+    snippet_pattern = re.compile(
+        r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    links = link_pattern.findall(html)
+    snippets = snippet_pattern.findall(html)
+
+    results = []
+    for i, (raw_url, raw_title) in enumerate(links):
+        if len(results) >= max_results:
+            break
+
+        # 从 DuckDuckGo redirect URL 中提取真实 URL
+        try:
+            parsed = urlparse(raw_url)
+            qs = parse_qs(parsed.query)
+            real_url = unquote(qs.get("uddg", [""])[0])
+        except Exception:  # noqa: BLE001
+            real_url = raw_url
+
+        if not real_url or not real_url.startswith("http"):
+            continue
+
+        # 清理 HTML 标签
+        title = re.sub(r'<[^>]+>', '', raw_title).strip()
+        if not title or len(title) < 4:
+            continue
+
+        snippet = ""
+        if i < len(snippets):
+            snippet = re.sub(r'<[^>]+>', '', snippets[i]).strip()
+
+        domain = urlparse(real_url).netloc
+        results.append({
+            "title": _humanize_title(title, real_url),
+            "source": domain,
+            "snippet": snippet,
+            "url": real_url,
+            "is_official": _is_official_domain(domain),
+        })
+
+    return results
+
+
 def search_web(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """
-    使用 ddgs (Bing 后端) 搜索网络信息，返回结构化搜索结果。
-    策略（多轮递进，确保拿到尽可能多的官方结果）：
-      R1. 精确官方域名 site 限定 + 关键词强化 (优先 cs.mfa.gov.cn 领事服务)
-      R2. 外交部域名 site 限定 + 关键词
-      R3. 仅关键词强化，不限定域名（官方域名会被搜索结果自然匹配）
-    每条结果包含：title, source(域名), snippet, url, is_official
+    搜索网络信息，只返回官方域名结果。
+    策略：多轮递进搜索，严格过滤——第三方结果全部丢弃。
+      R1. site:cs.mfa.gov.cn + 关键词强化
+      R2. site:mfa.gov.cn + 关键词
+      R3. 关键词强化(不加域名限制)，然后过滤只留官方域名
+      R4. 纯用户查询(最后兜底)，过滤只留官方域名
     """
-    try:
-        from ddgs import DDGS
+    print(f"[Web Search] 正在搜索：{query[:60]}...")
 
-        print(f"[Web Search] 正在搜索：{query[:60]}...")
+    clean_query = re.sub(r'\s+', ' ', query).strip()
+    kw_boost = "领事保护 外交部 领事服务"
 
-        clean_query = re.sub(r'\s+', ' ', query).strip()
+    # 多轮搜索查询
+    round_queries = [
+        f"{clean_query} {kw_boost} site:cs.mfa.gov.cn",
+        f"{clean_query} {kw_boost} site:mfa.gov.cn",
+        f"{clean_query} {kw_boost} site:www.gov.cn",
+        f"{clean_query} {kw_boost}",
+        clean_query,
+    ]
 
-        # 官方域名白名单(用于搜索后过滤标记)
-        OFFICIAL_DOMAINS = set(_OFFICIAL_AUTHORITY_MAP.keys())
+    official_results = []
+    seen_urls = set()
 
-        def _is_official(domain: str) -> bool:
-            return any(
-                domain == d or domain.endswith("." + d)
-                for d in OFFICIAL_DOMAINS
-            )
+    for ri, q in enumerate(round_queries, 1):
+        if len(official_results) >= max_results:
+            break
 
-        # 基础关键词强化：在用户查询基础上，附加领事/外交领域关键词，
-        # 即便用户没写，也能把结果拉向外交部/领事服务网官方内容
-        kw_boost = "领事保护 外交部 领事服务 涉外"
-
-        # 构造多轮搜索查询（按优先级排序）
-        # 注意：Bing 的 site: 语法支持 + 连接词，用 "site:xx OR site:yy" 均可
-        round_queries = [
-            # R1: 最严格的官方域名(中国领事服务网 + 外交部) + 关键词
-            f"{clean_query} {kw_boost} (site:cs.mfa.gov.cn OR site:mfa.gov.cn OR site:www.gov.cn)",
-            # R2: 官方域名 + 更宽泛关键词(避免 R1 太窄无结果)
-            f"{clean_query} 领事 外交部 (site:cs.mfa.gov.cn OR site:mfa.gov.cn)",
-            # R3: 关键词强化，无域名限制(自然也会搜到官方)
-            f"{clean_query} {kw_boost}",
-            # R4: 仅用户原查询(最后兜底)
-            clean_query,
-        ]
-
-        formatted = []
-        seen_urls = set()
-
-        for ri, q in enumerate(round_queries, 1):
-            if len(formatted) >= max_results:
-                break
+        # 优先用 DuckDuckGo HTML 接口；失败则 fallback 到 ddgs 包
+        raw_results = _search_ddg_html(q, max_results=max_results + 5)
+        if not raw_results:
+            # fallback: ddgs 包 (Bing 后端)
             try:
-                # ddgs 9.0.0 强制后端为 bing；显式指定 region=cn-zh 提升中文结果质量
-                raw_results = list(DDGS(timeout=15).text(
-                    q,
-                    region="cn-zh",
-                    max_results=max(max_results + 3, 8),
+                from ddgs import DDGS
+                ddgs_results = list(DDGS(timeout=15).text(
+                    q, region="cn-zh", max_results=max_results + 5,
                 ))
-                print(f"[Web Search] R{ri} 获取 {len(raw_results)} 条")
-            except Exception as e:  # noqa: BLE001
-                print(f"[Web Search] R{ri} 搜索失败: {type(e).__name__}: {e}")
                 raw_results = []
+                for r in ddgs_results:
+                    url = r.get("href", r.get("link", ""))
+                    if not url:
+                        continue
+                    domain = urlparse(url).netloc
+                    raw_results.append({
+                        "title": _humanize_title(r.get("title", ""), url),
+                        "source": domain,
+                        "snippet": r.get("body", r.get("snippet", "")),
+                        "url": url,
+                        "is_official": _is_official_domain(domain),
+                    })
+                print(f"[Web Search] R{ri}(ddgs fallback) 获取 {len(raw_results)} 条")
+            except Exception as e:  # noqa: BLE001
+                print(f"[Web Search] R{ri}(ddgs fallback) 失败: {e}")
+                raw_results = []
+        else:
+            print(f"[Web Search] R{ri}(DDG HTML) 获取 {len(raw_results)} 条")
 
-            for r in raw_results:
-                if len(formatted) >= max_results:
-                    break
-                url = r.get("href", r.get("link", ""))
-                if not url or url in seen_urls:
-                    continue
-                title = r.get("title", "")
-                snippet = r.get("body", r.get("snippet", ""))
-                if not (title and snippet):
-                    continue
-                seen_urls.add(url)
-                domain = urlparse(url).netloc or "未知来源"
-                formatted.append({
-                    "title": _humanize_title(title, url),
-                    "source": domain,
-                    "snippet": snippet,
-                    "url": url,
-                    "is_official": _is_official(domain),
-                })
+        # 严格过滤：只保留官方域名结果，丢弃所有第三方
+        for r in raw_results:
+            if len(official_results) >= max_results:
+                break
+            if not r.get("is_official"):
+                continue
+            if r["url"] in seen_urls:
+                continue
+            seen_urls.add(r["url"])
+            official_results.append(r)
 
-        # 排序:官方来源优先，然后按原来的顺序(保证多轮优先级)
-        # 用 enumerate 记录原始索引，避免 sort 打乱同优先级的顺序
-        indexed = [(i, d) for i, d in enumerate(formatted)]
-        indexed.sort(key=lambda x: (0 if x[1]["is_official"] else 1, x[0]))
-        formatted = [d for _, d in indexed]
-        formatted = formatted[:max_results]
-
-        print(f"[Web Search] 最终获取 {len(formatted)} 条网络搜索结果"
-              f"（官方 {sum(1 for r in formatted if r.get('is_official'))} 条）")
-        return formatted
-
-    except Exception as e:
-        print(f"[Web Search] 搜索失败: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
+    print(f"[Web Search] 最终获取 {len(official_results)} 条官方网络搜索结果")
+    return official_results
 
 
 def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
     """
     将网络搜索结果格式化为规范的「依据」卡片。
-    字段统一为:文件标题 / 官方机构 / 原句引用。
+    格式：依据[N] / 权威来源 / 发布机构 / 调取的原条文节选
     """
     if not web_results:
         return ""
@@ -543,17 +607,15 @@ def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
         source = result.get("source", "未知来源")
         snippet = result.get("snippet", "无摘要")
         url = result.get("url", "")
-        is_official = result.get("is_official", False)
 
-        # 官方机构:从域名解析规范名称
-        authority = _resolve_authority(source)
-        trust_label = "🏛 官方来源" if is_official else "📰 第三方网页"
+        # 权威来源 = 机构名（如"中国领事服务网"）
+        authority_name = _resolve_authority(source)
 
         formatted_part = f"""---
-🌐 **网络检索依据 [{i}]**  `{trust_label}`
-• **文件标题**：{title}
-• **官方机构**：{authority}
-• **原句引用**：
+🌐 **依据 [{i}]**
+• **权威来源**：{authority_name}
+• **发布机构**：{source}
+• **调取的原条文节选**：
   > "{snippet.strip()}"
 {f"• **链接**：{url}" if url else ""}
 ---"""
@@ -564,8 +626,8 @@ def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
 
 def format_local_db_reference(relevant_docs) -> str:
     """
-    将本地知识库检索结果格式化为「知识库校验」卡片。
-    字段统一为:文件标题 / 官方机构 / 原句引用。
+    将本地知识库检索结果格式化为「知识库校验依据」卡片。
+    格式：依据[N] / 权威来源 / 发布机构 / 调取的原条文节选
     """
     if not relevant_docs:
         return ""
@@ -578,10 +640,10 @@ def format_local_db_reference(relevant_docs) -> str:
         page_content = doc.page_content if hasattr(doc, 'page_content') else str(doc)
 
         formatted_part = f"""---
-📚 **知识库校验依据 [{i}]**  `🏛 官方指导文档`
-• **文件标题**：{source_title}
-• **官方机构**：{authority}
-• **原句引用**：
+📚 **知识库校验依据 [{i}]**
+• **权威来源**：{source_title}
+• **发布机构**：{authority}
+• **调取的原条文节选**：
   > "{page_content.strip()}"
 ---"""
         formatted_parts.append(formatted_part)
