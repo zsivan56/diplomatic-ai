@@ -14,9 +14,10 @@ easyocr==1.7.2
 openai==1.40.0
 
 # RAG 框架核心
-langchain==0.2.14
+# langchain-community 0.2.14 要求 langchain>=0.2.15,故升到 0.2.16
+langchain==0.2.16
 langchain-community==0.2.14
-langchain-core==0.2.32
+langchain-core==0.2.38
 langchain-text-splitters==0.2.2
 langchain-huggingface==0.0.3
 langchain-openai==0.1.22
