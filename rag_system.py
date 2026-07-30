@@ -302,6 +302,29 @@ def extract_text_from_image(
         return result
 
 
+def _humanize_title(title: str, url: str) -> str:
+    """
+    当搜索引擎返回的标题是 URL 形式时,尝试从 URL 路径提取可读片段作为标题。
+    否则返回原标题。
+    """
+    if not title:
+        return title
+    # 判断是否是 URL 形式的标题(以 http 开头或包含 / 且无中文空格分隔词)
+    if title.startswith("http") or (".gov.cn/" in title and len(title) > 30):
+        try:
+            path = urlparse(url).path if url else ""
+            # 取最后一段路径,去除扩展名和数字后缀
+            last_segment = path.rstrip("/").split("/")[-1] if path else ""
+            # 去除 .html/.htm 后缀和 _数字 后缀
+            last_segment = re.sub(r'\.(html?|shtml)$', '', last_segment)
+            last_segment = re.sub(r'_\d+$', '', last_segment)
+            if last_segment:
+                return f"外交部官方页面({last_segment})"
+        except Exception:
+            pass
+    return title
+
+
 def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
     """
     使用 DuckDuckGo 搜索网络信息，返回结构化搜索结果。
@@ -317,11 +340,12 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
         clean_query = re.sub(r'\s+', ' ', query).strip()
 
         # 官方权威域名白名单
+        # 注意:www.gov.cn 的 site: 语法会匹配所有 gov.cn 子域(含消防/教育等无关站点),
+        # 故只保留领事/外交相关的具体子域,避免搜出无关政府内容
         official_domains = [
-            "cs.mfa.gov.cn",      # 中国领事服务网
+            "cs.mfa.gov.cn",      # 中国领事服务网(最相关)
             "mfa.gov.cn",         # 中国外交部
-            "www.gov.cn",         # 中国政府网
-            "npc.gov.cn",         # 全国人大(法律)
+            "www.mfa.gov.cn",     # 外交部(带 www)
         ]
 
         formatted = []
@@ -344,7 +368,7 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
                         continue
                     seen_urls.add(url)
                     formatted.append({
-                        "title": title,
+                        "title": _humanize_title(title, url),
                         "source": urlparse(url).netloc or domain,
                         "snippet": snippet,
                         "url": url,
@@ -380,7 +404,7 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
                         for d in official_domains
                     )
                     formatted.append({
-                        "title": title,
+                        "title": _humanize_title(title, url),
                         "source": domain,
                         "snippet": snippet,
                         "url": url,
