@@ -305,32 +305,92 @@ def extract_text_from_image(
 def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
     """
     使用 DuckDuckGo 搜索网络信息，返回结构化搜索结果。
-    每条结果包含：title, source(域名), snippet, url
+    策略：优先搜索官方权威域名(mfa.gov.cn)，不足再用普通搜索补齐。
+    每条结果包含：title, source(域名), snippet, url, is_official
     """
     try:
         from ddgs import DDGS
 
-        # 加入领域关键词，提升搜索结果相关性
-        search_query = f"{query} 领事保护 外交部"
         print(f"[Web Search] 正在搜索：{query[:60]}...")
-        raw_results = list(DDGS().text(search_query, max_results=max_results))
+
+        # 去除用户问题里可能干扰 site: 语法的内容
+        clean_query = re.sub(r'\s+', ' ', query).strip()
+
+        # 官方权威域名白名单
+        official_domains = [
+            "cs.mfa.gov.cn",      # 中国领事服务网
+            "mfa.gov.cn",         # 中国外交部
+            "www.gov.cn",         # 中国政府网
+            "npc.gov.cn",         # 全国人大(法律)
+        ]
 
         formatted = []
-        for r in raw_results:
-            title = r.get("title", "")
-            url = r.get("href", r.get("link", ""))
-            snippet = r.get("body", r.get("snippet", ""))
-            domain = urlparse(url).netloc if url else "未知来源"
+        seen_urls = set()
 
-            if title and snippet:
-                formatted.append({
-                    "title": title,
-                    "source": domain,
-                    "snippet": snippet,
-                    "url": url,
-                })
+        # 第一轮：限定官方域名搜索(每个域名单独搜,提升命中)
+        for domain in official_domains:
+            if len(formatted) >= max_results:
+                break
+            try:
+                site_query = f"{clean_query} site:{domain}"
+                raw_results = list(DDGS().text(site_query, max_results=2))
+                for r in raw_results:
+                    url = r.get("href", r.get("link", ""))
+                    if not url or url in seen_urls:
+                        continue
+                    title = r.get("title", "")
+                    snippet = r.get("body", r.get("snippet", ""))
+                    if not (title and snippet):
+                        continue
+                    seen_urls.add(url)
+                    formatted.append({
+                        "title": title,
+                        "source": urlparse(url).netloc or domain,
+                        "snippet": snippet,
+                        "url": url,
+                        "is_official": True,
+                    })
+                    if len(formatted) >= max_results:
+                        break
+            except Exception as e:  # noqa: BLE001
+                print(f"[Web Search] 官方域名 {domain} 搜索失败: {e}")
+                continue
 
-        print(f"[Web Search] 获取到 {len(formatted)} 条网络搜索结果")
+        # 第二轮：官方结果不足,用普通搜索补齐(加入领域关键词)
+        if len(formatted) < max_results:
+            try:
+                general_query = f"{clean_query} 领事保护 外交部"
+                remaining = max_results - len(formatted)
+                raw_results = list(DDGS().text(general_query, max_results=remaining + 2))
+                for r in raw_results:
+                    if len(formatted) >= max_results:
+                        break
+                    url = r.get("href", r.get("link", ""))
+                    if not url or url in seen_urls:
+                        continue
+                    title = r.get("title", "")
+                    snippet = r.get("body", r.get("snippet", ""))
+                    if not (title and snippet):
+                        continue
+                    seen_urls.add(url)
+                    domain = urlparse(url).netloc or "未知来源"
+                    # 判断是否命中官方域名
+                    is_off = any(
+                        domain == d or domain.endswith("." + d)
+                        for d in official_domains
+                    )
+                    formatted.append({
+                        "title": title,
+                        "source": domain,
+                        "snippet": snippet,
+                        "url": url,
+                        "is_official": is_off,
+                    })
+            except Exception as e:  # noqa: BLE001
+                print(f"[Web Search] 普通搜索失败: {e}")
+
+        print(f"[Web Search] 获取到 {len(formatted)} 条网络搜索结果"
+              f"（官方 {sum(1 for r in formatted if r.get('is_official'))} 条）")
         return formatted
 
     except Exception as e:
@@ -347,20 +407,14 @@ def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
     if not web_results:
         return ""
 
-    # 官方域名白名单:仅这些域名的结果才可视为权威来源
-    OFFICIAL_DOMAINS = {"mfa.gov.cn", "cs.mfa.gov.cn", "gov.cn"}
-
     formatted_parts = []
     for i, result in enumerate(web_results, 1):
         title = result.get("title", "未知标题")
         source = result.get("source", "未知来源")  # 实为域名
         snippet = result.get("snippet", "无摘要")
         url = result.get("url", "")
+        is_official = result.get("is_official", False)
 
-        # 判断是否为官方域名
-        is_official = any(
-            source == d or source.endswith("." + d) for d in OFFICIAL_DOMAINS
-        )
         trust_label = "🏛 官方来源" if is_official else "📰 第三方网页"
 
         formatted_part = f"""---
@@ -524,6 +578,11 @@ def _process_query_inner(
         output["error"] = "网络搜索与本地知识库均未获取到有效参考信息，请稍后重试。"
         return output
 
+    # 网络搜索失败但本地知识库有结果时,继续流程(不再直接报错)
+    web_search_failed = not web_evidence_text
+    if web_search_failed:
+        print("[Web Search] 网络搜索无结果,仅依据本地知识库继续")
+
     # ========== 模块 E: 构建 Prompt 并调用 LLM ==========
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
@@ -532,12 +591,17 @@ def _process_query_inner(
         llm = _get_llm()
 
         system_content = f"""你是一名专业的外交领事与涉外礼仪智能助手。
-请结合以下网络搜索结果与本地知识库校验资料，回答用户的问题或对证件信息给出提醒。
+请结合以下参考依据，回答用户的问题或对证件信息给出提醒。
 
-要求：
+【依据说明】
+- 🌐 网络搜索结果：搜索引擎返回的网页摘要，非法规原文。其中「官方来源」可信度高，「第三方网页」仅供参考。
+- 📚 知识库校验：官方指导性文档节选，可信度最高，作为核实与纠错依据。
+
+【回答要求】
 1. 态度严谨、礼貌，符合外交礼仪规范。
-2. 网络搜索结果为主要的参考依据，本地知识库校验用于核实和补充，切勿捏造条款。
-3. 标注回答所参考的依据编号（如「依据 [1]」「知识库校验 [1]」）。
+2. 优先采信「🏛 官方来源」网络结果与「📚 知识库校验」；对「📰 第三方网页」内容需谨慎，不可作为事实依据。
+3. 切勿捏造条款、电话号码、法规条文。若依据中无相关信息，明确告知用户建议查询官方渠道（外交部 12308 热线）。
+4. 标注回答所参考的依据编号（如「网络搜索结果 [1]」「知识库校验 [2]」）。
 
 【参考依据】：
 {context_text}"""
