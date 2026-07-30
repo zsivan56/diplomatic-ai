@@ -576,10 +576,22 @@ def _process_query_inner(
     try:
         retriever = _get_retriever(cached_resources)
         print(f"[RAG] 正在检索本地知识库校验条款...")
+
+        # Sanity check: 确认向量库里有数据(防止连接到空 collection)
+        try:
+            underlying_db = retriever.vectorstore
+            collection_count = underlying_db._collection.count()
+            print(f"[RAG] 知识库文档数: {collection_count}")
+            if collection_count == 0:
+                local_db_diag = "知识库连接成功但 collection 为空（数据库可能未正确加载）"
+                # 不 return,继续尝试检索
+        except Exception as count_e:  # noqa: BLE001
+            print(f"[RAG] 无法获取知识库文档数: {count_e}")
+
         relevant_docs = retriever.invoke(combined_query)
         local_db_text = format_local_db_reference(relevant_docs)
         if not relevant_docs:
-            local_db_diag = "知识库未检索到匹配片段"
+            local_db_diag = "知识库未检索到匹配片段（可能数据库为空或 embedding 维度不匹配）"
     except Exception as e:  # noqa: BLE001
         local_db_err = f"{type(e).__name__}: {e}"
         print(f"[RAG] 本地知识库检索失败: {local_db_err}")

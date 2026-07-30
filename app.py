@@ -605,12 +605,22 @@ def main():
                 try:
                     # 预加载并注入全局缓存的模型
                     cached_resources = {}
+                    init_errors = []
                     try:
                         cached_resources["ocr_reader"] = get_cached_ocr_reader()
+                    except Exception as e:  # noqa: BLE001
+                        init_errors.append(f"OCR引擎: {type(e).__name__}: {e}")
+                    try:
                         cached_resources["embeddings"] = get_cached_embeddings()
                         cached_resources["vector_db"] = get_cached_vector_db(cached_resources["embeddings"])
-                    except Exception as init_err:  # noqa: F841
-                        pass
+                    except Exception as e:  # noqa: BLE001
+                        init_errors.append(f"向量库: {type(e).__name__}: {e}")
+                        print(f"[Init] 模型初始化失败: {e}")
+
+                    # 如果向量库初始化失败,在 UI 上提示用户
+                    if init_errors:
+                        for err in init_errors:
+                            print(f"[Init Error] {err}")
 
                     # 调用 RAG 系统
                     try:
