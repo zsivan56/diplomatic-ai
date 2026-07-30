@@ -126,6 +126,43 @@ def _get_ocr_reader(cached_resources: Optional[Dict[str, Any]] = None):
 SUPPORTED_IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'}
 
 
+def _preprocess_image_for_ocr(image_path: str, max_side: int = 1568) -> str:
+    """
+    OCR 前预处理:如果图片最大边超过 max_side,等比缩小后存为临时 PNG。
+    返回处理后的图片路径(未处理则返回原路径)。
+    目的:加速 CPU 端 EasyOCR,避免大图导致云端超时。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        # 无 Pillow 则跳过预处理,直接用原图
+        return image_path
+
+    try:
+        with Image.open(image_path) as img:
+            w, h = img.size
+            longest = max(w, h)
+            if longest <= max_side:
+                # 图片不大,无需预处理
+                return image_path
+
+            # 等比缩小
+            ratio = max_side / longest
+            new_size = (int(w * ratio), int(h * ratio))
+            resized = img.convert("RGB").resize(new_size, Image.LANCZOS)
+
+            # 保存为临时 PNG
+            import tempfile
+            fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="ocr_pre_")
+            os.close(fd)
+            resized.save(tmp_path, format="PNG")
+            print(f"[OCR] 图片预处理: {w}x{h} → {new_size[0]}x{new_size[1]}")
+            return tmp_path
+    except Exception as e:
+        print(f"[OCR] 图片预处理失败,使用原图: {e}")
+        return image_path
+
+
 def _clean_ocr_text(raw_lines):
     """
     清洗 OCR 识别出的原始文本：去除空白、过滤无意义的单字符碎片、合并行
@@ -205,13 +242,23 @@ def extract_text_from_image(
         # 懒加载 OCR 识别器（优先使用缓存模型，避免重复加载爆内存）
         ocr_reader = _get_ocr_reader(cached_resources)
 
-        raw_results = ocr_reader.readtext(
-            image_path,
-            detail=1,
-            paragraph=False,
-            contrast_ths=0.1,
-            adjust_contrast=0.5,
-        )
+        # 图片预处理：大图自动缩小,加速 CPU 端 OCR(最大边 1568px)
+        processed_path = _preprocess_image_for_ocr(image_path)
+        try:
+            raw_results = ocr_reader.readtext(
+                processed_path,
+                detail=1,
+                paragraph=False,
+                contrast_ths=0.1,
+                adjust_contrast=0.5,
+            )
+        finally:
+            # 清理预处理产生的临时文件(若与原路径不同)
+            if processed_path != image_path and os.path.exists(processed_path):
+                try:
+                    os.remove(processed_path)
+                except OSError:
+                    pass
 
         confident_lines = []
         low_conf_count = 0
@@ -293,23 +340,36 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
 
 def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
     """
-    将网络搜索结果格式化为结构化的「依据」卡片
+    将网络搜索结果格式化为结构化的「依据」卡片。
+    注意:网络搜索结果为搜索引擎返回的网页摘要,并非法规原文,
+    标注须如实反映其性质,避免误导用户。
     """
     if not web_results:
         return ""
 
+    # 官方域名白名单:仅这些域名的结果才可视为权威来源
+    OFFICIAL_DOMAINS = {"mfa.gov.cn", "cs.mfa.gov.cn", "gov.cn"}
+
     formatted_parts = []
     for i, result in enumerate(web_results, 1):
         title = result.get("title", "未知标题")
-        source = result.get("source", "未知来源")
+        source = result.get("source", "未知来源")  # 实为域名
         snippet = result.get("snippet", "无摘要")
+        url = result.get("url", "")
+
+        # 判断是否为官方域名
+        is_official = any(
+            source == d or source.endswith("." + d) for d in OFFICIAL_DOMAINS
+        )
+        trust_label = "🏛 官方来源" if is_official else "📰 第三方网页"
 
         formatted_part = f"""---
-🌐 **依据 [{i}]**
-• **权威来源**：{title}
-• **发布机构**：{source}
-• **调取的原条文节选**：
+🌐 **网络搜索结果 [{i}]**  `{trust_label}`
+• **网页标题**：{title}
+• **来源域名**：{source}
+• **网页摘要**（搜索引擎返回，非法规原文，仅供参考）：
   > "{snippet.strip()}"
+{f"• **链接**：{url}" if url else ""}
 ---"""
         formatted_parts.append(formatted_part)
 
@@ -318,7 +378,9 @@ def format_web_evidence(web_results: List[Dict[str, str]]) -> str:
 
 def format_local_db_reference(relevant_docs) -> str:
     """
-    将本地知识库检索结果格式化为「知识库校验」卡片，用于纠正幻觉
+    将本地知识库检索结果格式化为「知识库校验」卡片。
+    知识库源文件为官方指导性文档（如《中国领事保护与协助指南》），
+    非严格意义上的法规条文，标注须如实反映。
     """
     if not relevant_docs:
         return ""
@@ -331,10 +393,10 @@ def format_local_db_reference(relevant_docs) -> str:
         page_content = doc.page_content if hasattr(doc, 'page_content') else str(doc)
 
         formatted_part = f"""---
-📚 **知识库校验 [{i}]**
-• **权威来源**：{source_title}
+📚 **知识库校验 [{i}]**  `🏛 官方指导文档`
+• **文件名称**：{source_title}
 • **发布机构**：{authority}
-• **调取的原条文节选**：
+• **知识库文档节选**：
   > "{page_content.strip()}"
 ---"""
         formatted_parts.append(formatted_part)

@@ -488,7 +488,7 @@ def main():
         uploaded_file = st.file_uploader(
             label="上传护照、签证、告示等证件图片",
             type=['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif', 'webp'],
-            help="支持格式：JPG、PNG、BMP、TIFF、WebP，建议图片清晰、文字正面朝上",
+            help="支持格式：JPG、PNG、BMP、TIFF、WebP，建议图片清晰、文字正面朝上。大图会自动压缩以加速识别。",
             label_visibility="collapsed"
         )
 
@@ -511,7 +511,7 @@ def main():
     # ===== 右侧：智能研判与依据区（60%）=====
     with col_right:
         # 创建 Tabs
-        tab_answer, tab_evidence = st.tabs(["🤖 智能研判解答", "🔍 调用的权威法规与依据"])
+        tab_answer, tab_evidence = st.tabs(["🤖 智能研判解答", "🔍 调用的参考资料与依据"])
 
     # ========== 处理提交逻辑 ==========
     should_run = submit_button or st.session_state.get("trigger_query", False)
@@ -545,13 +545,13 @@ def main():
             else:
                 st.info("暂无解答内容，请提交问题后查看。")
 
-        # ===== Tab 2: 权威依据 =====
+        # ===== Tab 2: 参考依据 =====
         with tab_evidence:
             context = result.get("context_text", "")
             if context:
                 st.markdown("""
                 <div style="color: #1A365D; font-weight: 600; margin-bottom: 0.8rem; font-size: 0.95rem;">
-                    📚 以下内容包含：<b>🌐 网络搜索依据</b>（主要信息来源）与 <b>📚 知识库校验</b>（纠正幻觉）：
+                    📚 以下内容包含：<b>🌐 网络搜索结果</b>（搜索引擎返回的网页摘要，非法规原文）与 <b>📚 知识库校验</b>（官方指导文档节选）：
                 </div>
                 """, unsafe_allow_html=True)
                 st.markdown(context)
