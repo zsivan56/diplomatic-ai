@@ -545,15 +545,10 @@ def main():
             else:
                 st.info("暂无解答内容，请提交问题后查看。")
 
-        # ===== Tab 2: 参考依据 =====
+        # ===== Tab 2: 检索依据 =====
         with tab_evidence:
             context = result.get("context_text", "")
             if context:
-                st.markdown("""
-                <div style="color: #1A365D; font-weight: 600; margin-bottom: 0.8rem; font-size: 0.95rem;">
-                    📚 以下内容包含：<b>🌐 网络搜索结果</b>（搜索引擎返回的网页摘要，非法规原文）与 <b>📚 知识库校验</b>（官方指导文档节选）：
-                </div>
-                """, unsafe_allow_html=True)
                 st.markdown(context)
             else:
                 st.info("暂无检索依据，请提交问题后查看。")

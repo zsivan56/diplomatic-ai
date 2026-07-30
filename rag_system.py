@@ -53,6 +53,67 @@ def _get_llm():
     return _llm
 
 
+def _search_txt_files_fallback(query: str, top_k: int = 3) -> List[Dict[str, str]]:
+    """
+    文件级 fallback:当 ChromaDB 不可用时,直接从 .txt 源文件做关键词匹配。
+    返回与 format_local_db_reference 兼容的 dict 列表。
+    """
+    source_files = {
+        "中国领事保护与协助指南.txt": "《中国领事保护与协助指南》",
+        "外交相关知识.txt": "《外交礼仪与涉外事务规范》",
+        "日本.txt": "《赴日领事服务与注意事项》",
+    }
+    authority = "中华人民共和国外交部"
+
+    query_lower = query.lower()
+    # 提取关键词(去掉标点和停用词)
+    keywords = [w for w in re.split(r'[\s，。！？、；：""''（）\\[\\]()]+', query) if len(w) >= 2]
+    if not keywords:
+        keywords = [query]
+
+    results = []
+    for fname, title in source_files.items():
+        try:
+            fpath = os.path.join(os.path.dirname(__file__), fname)
+            if not os.path.exists(fpath):
+                continue
+            with open(fpath, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            # 按段落切分,找匹配关键词最多的段落
+            paragraphs = []
+            current_para = []
+            for line in lines:
+                if line.strip():
+                    current_para.append(line.strip())
+                elif current_para:
+                    paragraphs.append('\n'.join(current_para))
+                    current_para = []
+            if current_para:
+                paragraphs.append('\n'.join(current_para))
+
+            scored = []
+            for para in paragraphs:
+                para_lower = para.lower()
+                score = sum(1 for kw in keywords if kw.lower() in para_lower)
+                if score > 0:
+                    scored.append((score, para))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for score, para in scored[:top_k]:
+                results.append({
+                    "source_title": title,
+                    "authority": authority,
+                    "page_content": para[:500],
+                })
+        except Exception as e:  # noqa: BLE001
+            print(f"[Fallback] 读取 {fname} 失败: {e}")
+            continue
+
+    results.sort(key=lambda x: -len(x["page_content"]))
+    return results[:top_k]
+
+
 def _get_retriever(cached_resources: Optional[Dict[str, Any]] = None):
     """懒加载向量数据库检索器，支持从外部注入缓存的 embedding / vector_db"""
     global _retriever
@@ -325,12 +386,11 @@ def _humanize_title(title: str, url: str) -> str:
     return title
 
 
-def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
+def search_web(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """
     使用 DuckDuckGo 搜索网络信息，返回结构化搜索结果。
-    策略：普通关键词搜索（中文 + 领域强化词），然后按域名过滤，
-    把官方结果（cs.mfa.gov.cn / mfa.gov.cn）排到前面，
-    不使用 site: 语法（海外服务器上 site: 常返回 0 条）。
+    策略：纯用户问题搜索(不加额外关键词),
+    因为海外服务器上 DuckDuckGo 对添加关键词的短查询反而不友好。
     每条结果包含：title, source(域名), snippet, url, is_official
     """
     try:
@@ -338,13 +398,11 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
 
         print(f"[Web Search] 正在搜索：{query[:60]}...")
 
-        # 去除多余空白字符
         clean_query = re.sub(r'\s+', ' ', query).strip()
 
-        # 官方域名白名单(用于搜索后过滤标记),与 _OFFICIAL_AUTHORITY_MAP 保持一致
+        # 官方域名白名单(用于搜索后过滤标记)
         OFFICIAL_DOMAINS = set(_OFFICIAL_AUTHORITY_MAP.keys())
 
-        # 只要官方域名后缀命中（含子域）即算官方
         def _is_official(domain: str) -> bool:
             return any(
                 domain == d or domain.endswith("." + d)
@@ -354,26 +412,24 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
         formatted = []
         seen_urls = set()
 
-        # 第一轮：普通搜索（带领域强化词）
-        # 海外服务器上 site: cs.mfa.gov.cn 几乎搜不到结果，
-        # 用关键词强化（外交部 领事 礼仪 出国 安全 签证）+ 后过滤更可靠
-        boosted_query = f"{clean_query} 外交部 领事"
+        # 用纯用户问题搜索(最朴素的查询方式,在海外服务器上兼容性最好)
         try:
-            raw_results = list(DDGS().text(boosted_query, max_results=max_results + 3))
+            raw_results = list(DDGS().text(clean_query, max_results=max_results + 3))
         except Exception as e:  # noqa: BLE001
-            print(f"[Web Search] 第一轮(boosted)搜索失败: {e}")
+            print(f"[Web Search] 搜索失败(纯查询): {e}")
             raw_results = []
 
-        # 第一轮没结果时，第二轮：不加领域词的纯用户问题
+        # 如果纯查询没有结果,加上"外交部"关键词再试一次
         if not raw_results:
             try:
-                raw_results = list(DDGS().text(clean_query, max_results=max_results + 3))
+                keyword_query = f"{clean_query} 外交部"
+                raw_results = list(DDGS().text(keyword_query, max_results=max_results + 3))
+                print(f"[Web Search] 改用带关键词查询: {keyword_query[:60]}")
             except Exception as e:  # noqa: BLE001
-                print(f"[Web Search] 第二轮(plain)搜索失败: {e}")
-                raw_results = []
+                print(f"[Web Search] 搜索失败(关键词查询): {e}")
 
         for r in raw_results:
-            if len(formatted) >= max_results + 3:  # 多取 3 条用于后过滤排序
+            if len(formatted) >= max_results:
                 break
             url = r.get("href", r.get("link", ""))
             if not url or url in seen_urls:
@@ -392,10 +448,8 @@ def search_web(query: str, max_results: int = 3) -> List[Dict[str, str]]:
                 "is_official": _is_official(domain),
             })
 
-        # 排序：官方结果优先，然后按原顺序
+        # 排序:官方来源优先
         formatted.sort(key=lambda x: (not x["is_official"]))
-
-        # 只取前 max_results 条
         formatted = formatted[:max_results]
 
         print(f"[Web Search] 获取到 {len(formatted)} 条网络搜索结果"
@@ -578,46 +632,49 @@ def _process_query_inner(
 
     # ========== 模块 C: 网络搜索（主要信息来源）==========
     web_results = []
-    web_evidence_text = ""
-    web_search_diag = ""  # 诊断:失败原因,用于兜底提示
     try:
-        # 主要数据来源:网络搜索,取 5 条
         web_results = search_web(combined_query, max_results=5)
-        web_evidence_text = format_web_evidence(web_results)
-        if not web_results:
-            web_search_diag = "搜索引擎未返回有效结果（可能因服务器网络区域限制）"
     except Exception as e:  # noqa: BLE001
         print(f"[Web Search] 异常: {e}")
-        web_search_diag = f"搜索异常：{type(e).__name__}: {e}"
 
     # ========== 模块 D: 本地知识库检索（纠正幻觉）==========
-    local_db_text = ""
-    local_db_diag = ""
+    local_results = []
+    local_retrieval_ok = False
     try:
         retriever = _get_retriever(cached_resources)
-        print(f"[RAG] 正在检索本地知识库校验条款...")
+        print(f"[RAG] 正在检索本地知识库...")
 
-        # Sanity check: 确认向量库里有数据(防止连接到空 collection)
+        # Sanity check: 确认向量库里有数据
         try:
             underlying_db = retriever.vectorstore
             collection_count = underlying_db._collection.count()
             print(f"[RAG] 知识库文档数: {collection_count}")
-            if collection_count == 0:
-                local_db_diag = "知识库连接成功但 collection 为空（数据库可能未正确加载）"
-                # 不 return,继续尝试检索
         except Exception as count_e:  # noqa: BLE001
             print(f"[RAG] 无法获取知识库文档数: {count_e}")
 
-        relevant_docs = retriever.invoke(combined_query)
-        local_db_text = format_local_db_reference(relevant_docs)
-        if not relevant_docs:
-            local_db_diag = "知识库未检索到匹配片段（可能数据库为空或 embedding 维度不匹配）"
+        local_results = retriever.invoke(combined_query)
+        if local_results:
+            local_retrieval_ok = True
     except Exception as e:  # noqa: BLE001
-        local_db_err = f"{type(e).__name__}: {e}"
-        print(f"[RAG] 本地知识库检索失败: {local_db_err}")
-        local_db_diag = local_db_err
+        print(f"[RAG] 向量库检索失败,启用文件级 fallback: {e}")
 
-    # 合并展示：网络依据 + 知识库校验
+    # 如果向量库检索无结果,用文件级 fallback 兜底
+    if not local_results:
+        print("[RAG] 向量库无结果,启用 .txt 文件关键词匹配 fallback")
+        fallback_results = _search_txt_files_fallback(combined_query, top_k=3)
+        if fallback_results:
+            # 转为与 format_local_db_reference 兼容的格式
+            class _FallbackDoc:
+                def __init__(self, d):
+                    self.metadata = {"source_title": d["source_title"], "authority": d["authority"]}
+                    self.page_content = d["page_content"]
+            local_results = [_FallbackDoc(d) for d in fallback_results]
+            print(f"[RAG] 文件级 fallback 获取到 {len(local_results)} 条结果")
+
+    # 合并展示：网络检索依据 + 知识库校验依据
+    web_evidence_text = format_web_evidence(web_results)
+    local_db_text = format_local_db_reference(local_results)
+
     context_parts = []
     if web_evidence_text:
         context_parts.append(web_evidence_text)
@@ -627,42 +684,14 @@ def _process_query_inner(
     context_text = "\n\n".join(context_parts) if context_parts else ""
     output["context_text"] = context_text
 
-    # 诊断信息,用于 LLM fallback 时显示给用户
-    retrieval_hint_parts = []
-    if web_search_diag:
-        retrieval_hint_parts.append(f"• 🌐 网络搜索：{web_search_diag}")
-    if local_db_diag:
-        retrieval_hint_parts.append(f"• 📚 本地知识库：{local_db_diag}")
-    retrieval_hint = "\n".join(retrieval_hint_parts)
-
-    # 任何一边有结果就正常继续(不再报错)
-    # 两边都空时也继续走 LLM fallback,不直接报错,但在 LLM 回答前加免责声明
-    fallback_mode = (not context_text)
-
     # ========== 模块 E: 构建 Prompt 并调用 LLM ==========
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
 
-        # 懒加载 LLM
         llm = _get_llm()
 
-        if fallback_mode:
-            # 检索全空:fallback 模式,LLM 仅能基于自身训练知识回答,
-            # 必须严格免责 + 严禁捏造法规/电话等事实信息
-            system_content = f"""你是一名专业的外交领事与涉外礼仪智能助手。
-
-⚠️ 【重要警示】: 本次查询网络搜索与本地知识库均未获取到有效参考依据。
-你只能基于自己的训练知识给出**一般性的建议或指引**,不可当作最终权威结论。
-
-【回答必须遵守】:
-1. 开头必须先声明:「⚠️ 提示：本次未检索到实时官方资料，以下仅为一般性参考指引，请以中华人民共和国外交部 12308 领事保护热线或当地使领馆官方答复为准。」
-2. 严禁捏造或杜撰任何具体的法律法规条文、电话号码、签证要求或具体国别政策。
-3. 涉及领事应急/证件办理/法规效力类问题,必须明确引导用户拨打 12308 或查询 cs.mfa.gov.cn 官方渠道。
-4. 回答应礼貌、严谨,不给出绝对性承诺。
-
-【用户问题】: {combined_query}"""
-        else:
-            system_content = f"""你是一名专业的外交领事与涉外礼仪智能助手。
+        # 无论检索结果如何,统一走 LLM(不再有 fallback_mode)
+        system_content = f"""你是一名专业的外交领事与涉外礼仪智能助手。
 请结合以下参考依据，回答用户的问题或对证件信息给出提醒。
 
 【依据说明】
@@ -690,23 +719,7 @@ def _process_query_inner(
             SystemMessage(content=system_content),
             HumanMessage(content=user_content),
         ])
-        llm_text = response.content
-
-        # Fallback 模式:在回答前置诊断提示(便于用户直观看到哪一步失败)
-        if fallback_mode:
-            diag_lines = ["### ⚠️ 检索状态说明"]
-            diag_lines.append("")
-            diag_lines.append("本次未能获取到实时或本地参考依据,已切换为通用知识答复模式:")
-            diag_lines.append("")
-            diag_lines.append(retrieval_hint or "• 未知原因")
-            diag_lines.append("")
-            diag_lines.append("如需获得权威答案,建议稍后重试,或直接拨打外交部 12308 领事保护热线。")
-            diag_lines.append("")
-            diag_lines.append("---")
-            diag_lines.append("")
-            llm_text = "\n".join(diag_lines) + llm_text
-
-        output["llm_answer"] = llm_text
+        output["llm_answer"] = response.content
 
     except Exception as e:  # noqa: BLE001
         output["error"] = f"大模型调用失败：{type(e).__name__}: {e}"
